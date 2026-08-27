@@ -3,6 +3,7 @@ import json
 import time
 import random
 import requests
+import re
 import paho.mqtt.client as mqtt
 from face_search import FaceSearcher
 
@@ -20,7 +21,7 @@ person_dwell_times = {}
 
 # Initialize Milvus FaceSearcher
 print(f"[{NODE_ID}] Initializing Milvus Face Searcher...")
-face_db = FaceSearcher(host=MILVUS_HOST, port=MILVUS_PORT)
+face_db = FaceSearcher(host=MILVUS_HOST, port=MILVUS_PORT, collection_name="watchlist_faces")
 
 # Seed database with mock profiles for testing if empty
 def seed_mock_profiles():
@@ -46,6 +47,46 @@ def seed_mock_profiles():
 
 time.sleep(2)  # Give Milvus time to prepare
 seed_mock_profiles()
+
+def load_configured_location():
+    try:
+        fog_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(fog_dir)
+        loc_file = os.path.join(root_dir, "dashboard", "src", "config", "location.js")
+        if os.path.exists(loc_file):
+            with open(loc_file, "r") as f:
+                content = f.read()
+            lat_match = re.search(r"lat\s*:\s*([\d\.-]+)", content)
+            lng_match = re.search(r"lng\s*:\s*([\d\.-]+)", content)
+            if lat_match and lng_match:
+                return float(lat_match.group(1)), float(lng_match.group(1))
+    except Exception as e:
+        print(f"[Fog Location Ingest] Error reading location.js: {e}")
+    return None, None
+
+def get_ip_location():
+    try:
+        r = requests.get('https://ipapi.co/json/', timeout=3.0)
+        if r.status_code == 200:
+            data = r.json()
+            return float(data.get("latitude")), float(data.get("longitude"))
+    except Exception:
+        pass
+    return None, None
+
+def get_node_coordinates():
+    # 1. Try IP Geolocation
+    lat, lng = get_ip_location()
+    if lat is not None and lng is not None:
+        return lat, lng
+        
+    # 2. Try location.js config fallback
+    lat, lng = load_configured_location()
+    if lat is not None and lng is not None:
+        return lat, lng
+        
+    # 3. Static default coordinates
+    return 28.6139, 77.2090
 
 def analyze_anomaly(detection, node_id):
     """Simple rule-based anomaly detection engine."""
@@ -130,13 +171,14 @@ def on_message(client, userdata, msg):
                     severity = anomaly["severity"]
 
             if is_escalated:
+                node_lat, node_lng = get_node_coordinates()
                 alert_payload = {
                     "node_id": node_id,
                     "event_type": ", ".join(alert_reason),
                     "severity": severity,
                     "details": face_result["name"] if face_result else "No face matched",
-                    "lat": 37.7749 + random.uniform(-0.01, 0.01),  # Simulated spatio-temporal location (SF default)
-                    "lng": -122.4194 + random.uniform(-0.01, 0.01),
+                    "lat": node_lat + random.uniform(-0.005, 0.005),
+                    "lng": node_lng + random.uniform(-0.005, 0.005),
                     "extra_info": anomaly["details"] if anomaly else "No anomaly detailed."
                 }
                 

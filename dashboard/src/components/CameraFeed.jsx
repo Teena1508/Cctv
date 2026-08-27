@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { MapPin } from 'lucide-react';
-import { CURRENT_NODE_LOCATION } from '../config/location'; // Central coordinate source
+import { CURRENT_NODE_LOCATION } from '../config/location';
 
 function formatExactTimestamp(dateObj = new Date()) {
     const year = dateObj.getFullYear();
@@ -32,29 +32,35 @@ export default function CameraFeed({
     const onDetectionRef = useRef(onDetection);
     const onLocationClickRef = useRef(onLocationClick);
     const enrolledPlatesRef = useRef(enrolledPlates);
+    const enrolledTargetsRef = useRef(enrolledTargets);
 
     useEffect(() => { onDetectionRef.current = onDetection; }, [onDetection]);
     useEffect(() => { onLocationClickRef.current = onLocationClick; }, [onLocationClick]);
     useEffect(() => { enrolledPlatesRef.current = enrolledPlates; }, [enrolledPlates]);
+    useEffect(() => { enrolledTargetsRef.current = enrolledTargets; }, [enrolledTargets]);
 
-    // Priority: Passed props -> Central config
     const activeLocation = {
         address: 'Primary Surveillance Hub',
         lat: latitude ?? CURRENT_NODE_LOCATION.lat,
         lng: longitude ?? CURRENT_NODE_LOCATION.lng
     };
 
+    const activeLocationRef = useRef(activeLocation);
+    useEffect(() => {
+        activeLocationRef.current = activeLocation;
+    }, [latitude, longitude, activeLocation.address]);
+
     const [error, setError] = useState(null);
     const [isScanning, setIsScanning] = useState(false);
-    const [lastDetectedPlate, setLastDetectedPlate] = useState(null);
+    const [lastMatch, setLastMatch] = useState(null);
+    const [aiBackendOffline, setAiBackendOffline] = useState(false);
 
-    // Auto-clear match banner after 4 seconds
     useEffect(() => {
-        if (lastDetectedPlate) {
-            const timer = setTimeout(() => setLastDetectedPlate(null), 4000);
+        if (lastMatch) {
+            const timer = setTimeout(() => setLastMatch(null), 4000);
             return () => clearTimeout(timer);
         }
-    }, [lastDetectedPlate]);
+    }, [lastMatch]);
 
     // 1. Live Webcam Stream Setup
     useEffect(() => {
@@ -64,7 +70,11 @@ export default function CameraFeed({
             if (streamUrl) return;
             try {
                 activeStream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    },
                     audio: false,
                 });
 
@@ -76,7 +86,7 @@ export default function CameraFeed({
                 }
             } catch (err) {
                 console.error("Camera Access Error:", err);
-                setError("Camera access required. Ensure URL is localhost.");
+                setError("Camera access required. Ensure URL is localhost or HTTPS.");
             }
         }
 
@@ -89,15 +99,31 @@ export default function CameraFeed({
         };
     }, [streamUrl]);
 
-    // 2. Snapshot Scanning to Python API
+    // Helper to extract frame blob reliably
+    const captureFrameBlob = (mediaSource, width, height) => {
+        return new Promise((resolve) => {
+            const frameCanvas = document.createElement('canvas');
+            frameCanvas.width = width;
+            frameCanvas.height = height;
+            const ctx = frameCanvas.getContext('2d');
+
+            // Un-mirror stream if local camera for visual consistency
+            ctx.drawImage(mediaSource, 0, 0, width, height);
+
+            frameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.95);
+        });
+    };
+
+    // 2. Snapshot Scanning Loop (Plates & Faces)
     useEffect(() => {
         let isProcessingFrame = false;
 
         const scanInterval = setInterval(async () => {
-            const targets = enrolledPlatesRef.current;
-            if (isProcessingFrame || !targets || targets.length === 0) {
-                return;
-            }
+            const plates = enrolledPlatesRef.current;
+            const targets = enrolledTargetsRef.current;
+            const activeLoc = activeLocationRef.current;
+
+            if (isProcessingFrame) return;
 
             const mediaSource = streamUrl ? imgRef.current : videoRef.current;
             if (!mediaSource) return;
@@ -107,90 +133,136 @@ export default function CameraFeed({
 
             if (!srcWidth || !srcHeight) return;
 
+            // Dynamically resize overlay canvas to match active stream scale
+            if (canvasRef.current && (canvasRef.current.width !== srcWidth || canvasRef.current.height !== srcHeight)) {
+                canvasRef.current.width = srcWidth;
+                canvasRef.current.height = srcHeight;
+            }
+
             try {
                 isProcessingFrame = true;
                 setIsScanning(true);
 
-                const frameCanvas = document.createElement('canvas');
-                frameCanvas.width = srcWidth;
-                frameCanvas.height = srcHeight;
-                const ctx = frameCanvas.getContext('2d');
-                ctx.drawImage(mediaSource, 0, 0, srcWidth, srcHeight);
+                const blob = await captureFrameBlob(mediaSource, srcWidth, srcHeight);
+                if (!blob) {
+                    isProcessingFrame = false;
+                    setIsScanning(false);
+                    return;
+                }
 
-                frameCanvas.toBlob(async (blob) => {
-                    if (!blob) {
-                        isProcessingFrame = false;
-                        setIsScanning(false);
-                        return;
-                    }
-
-                    const formData = new FormData();
-                    formData.append('file', blob, 'frame.jpg');
+                // A. SCAN LICENSE PLATES
+                if (plates && plates.length > 0) {
+                    const plateFormData = new FormData();
+                    plateFormData.append('file', blob, 'frame.jpg');
 
                     try {
                         const response = await fetch('http://localhost:8002/api/scan-plate', {
                             method: 'POST',
-                            body: formData,
+                            body: plateFormData,
                         });
 
-                        if (!response.ok) {
-                            throw new Error(`Server status ${response.status}`);
-                        }
+                        if (response.ok) {
+                            setAiBackendOffline(false);
+                            const data = await response.json();
+                            if (data.results && data.results.length > 0) {
+                                data.results.forEach((item) => {
+                                    const rawDetected = item.text || '';
+                                    const cleanDetected = rawDetected.replace(/[^A-Z0-9]/gi, '').toUpperCase();
 
-                        const data = await response.json();
+                                    const matched = plates.find((plate) => {
+                                        const cleanPlate = plate.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+                                        return cleanPlate && cleanDetected && (cleanDetected.includes(cleanPlate) || cleanPlate.includes(cleanDetected));
+                                    });
 
-                        if (data.results && data.results.length > 0) {
-                            data.results.forEach((item) => {
-                                const rawDetected = item.text || '';
-                                const cleanDetected = rawDetected.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-
-                                const matched = targets.find((target) => {
-                                    const cleanTarget = target.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-                                    if (!cleanTarget || !cleanDetected) return false;
-
-                                    return cleanDetected.includes(cleanTarget) || cleanTarget.includes(cleanDetected);
+                                    if (matched) {
+                                        const exactTime = formatExactTimestamp(new Date());
+                                        setLastMatch(`PLATE: ${matched}`);
+                                        if (onDetectionRef.current) {
+                                            onDetectionRef.current({
+                                                id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                                eventType: 'PLATE MATCH',
+                                                subject: matched,
+                                                details: `Target plate identified on ${cameraId}: ${rawDetected}`,
+                                                lat: activeLoc.lat,
+                                                lng: activeLoc.lng,
+                                                address: activeLoc.address,
+                                                cameraId: cameraId,
+                                                cameraName: cameraName,
+                                                timestamp: exactTime,
+                                                confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
+                                                severity: 'CRITICAL',
+                                            });
+                                        }
+                                    }
                                 });
+                            }
+                        } else {
+                            setAiBackendOffline(true);
+                        }
+                    } catch (err) {
+                        console.error("ANPR Error:", err);
+                        setAiBackendOffline(true);
+                    }
+                }
 
-                                if (matched) {
-                                    const exactDetectionTime = formatExactTimestamp(new Date());
-                                    setLastDetectedPlate(matched);
+                // B. SCAN FACES
+                if (targets && targets.length > 0) {
+                    const faceFormData = new FormData();
+                    faceFormData.append('file', blob, 'frame.jpg');
 
+                    // Send serialized target string safely
+                    faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
+
+                    try {
+                        const response = await fetch('http://localhost:8002/api/scan-face', {
+                            method: 'POST',
+                            body: faceFormData,
+                        });
+
+                        if (response.ok) {
+                            setAiBackendOffline(false);
+                            const data = await response.json();
+                            if (data.matches && data.matches.length > 0) {
+                                data.matches.forEach((face) => {
+                                    const exactTime = formatExactTimestamp(new Date());
+                                    setLastMatch(`TARGET: ${face.name || face.label || 'UNKNOWN'}`);
                                     if (onDetectionRef.current) {
                                         onDetectionRef.current({
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                            eventType: 'PLATE MATCH',
-                                            subject: matched,
-                                            details: `Target plate identified on ${cameraId}: ${rawDetected}`,
-                                            lat: activeLocation.lat,
-                                            lng: activeLocation.lng,
-                                            address: activeLocation.address,
+                                            eventType: 'TARGET MATCH',
+                                            subject: face.name || face.label,
+                                            details: `Facial match identified on ${cameraId}`,
+                                            lat: activeLoc.lat,
+                                            lng: activeLoc.lng,
+                                            address: activeLoc.address,
                                             cameraId: cameraId,
                                             cameraName: cameraName,
-                                            timestamp: exactDetectionTime,
-                                            confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
+                                            timestamp: exactTime,
+                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 90,
                                             severity: 'CRITICAL',
                                         });
                                     }
-                                }
-                            });
+                                });
+                            }
+                        } else {
+                            setAiBackendOffline(true);
                         }
-                    } catch (fetchErr) {
-                        console.error("ANPR Endpoint Error:", fetchErr);
-                    } finally {
-                        isProcessingFrame = false;
-                        setIsScanning(false);
+                    } catch (err) {
+                        console.warn("Face Endpoint Error:", err);
+                        setAiBackendOffline(true);
                     }
-                }, 'image/jpeg', 0.85);
+                }
 
             } catch (e) {
-                console.warn("Frame capture exception:", e);
+                console.warn("Frame processing exception:", e);
+            } finally {
                 isProcessingFrame = false;
                 setIsScanning(false);
             }
-        }, 800);
+        }, 1000); // 1-second interval to avoid choking backend inference engines
 
         return () => clearInterval(scanInterval);
-    }, [cameraId, cameraName, activeLocation.lat, activeLocation.lng, activeLocation.address, streamUrl]);
+    }, [cameraId, cameraName, streamUrl]);
 
     // 3. UI Canvas Overlay
     useEffect(() => {
@@ -208,36 +280,36 @@ export default function CameraFeed({
 
                 ctx.clearRect(0, 0, width, height);
 
-                const hasPlates = enrolledPlates && enrolledPlates.length > 0;
+                const hasActiveWatchlist = (enrolledPlates && enrolledPlates.length > 0) || (enrolledTargets && enrolledTargets.length > 0);
 
-                if (hasPlates) {
+                if (hasActiveWatchlist) {
                     const boxX = width * 0.15;
                     const boxY = height * 0.15;
                     const boxW = width * 0.70;
                     const boxH = height * 0.70;
 
-                    ctx.strokeStyle = lastDetectedPlate ? '#10b981' : '#f59e0b';
-                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = lastMatch ? '#10b981' : '#f59e0b';
+                    ctx.lineWidth = 3;
                     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
                     const scanLineY = boxY + ((Math.sin(Date.now() / 250) + 1) / 2) * boxH;
-                    ctx.strokeStyle = lastDetectedPlate ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
+                    ctx.strokeStyle = lastMatch ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
                     ctx.lineWidth = 2;
                     ctx.beginPath();
                     ctx.moveTo(boxX, scanLineY);
                     ctx.lineTo(boxX + boxW, scanLineY);
                     ctx.stroke();
 
-                    ctx.fillStyle = lastDetectedPlate ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
-                    ctx.fillRect(boxX, boxY - 26, boxW, 26);
+                    ctx.fillStyle = lastMatch ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
+                    ctx.fillRect(boxX, boxY - 30, boxW, 30);
                     ctx.fillStyle = '#ffffff';
-                    ctx.font = 'bold 11px monospace';
+                    ctx.font = 'bold 14px monospace';
 
-                    const labelText = lastDetectedPlate
-                        ? `MATCH DETECTED: ${lastDetectedPlate}`
-                        : (isScanning ? 'EASYOCR INFERENCE RUNNING...' : 'ANPR ENGINE READY');
+                    const labelText = lastMatch
+                        ? `MATCH DETECTED: ${lastMatch}`
+                        : (isScanning ? 'AI SCANNER ACTIVE...' : 'DETECTION ENGINE READY');
 
-                    ctx.fillText(labelText, boxX + 8, boxY - 9);
+                    ctx.fillText(labelText, boxX + 10, boxY - 10);
                 }
             }
             animationId = requestAnimationFrame(renderOverlay);
@@ -245,7 +317,7 @@ export default function CameraFeed({
 
         renderOverlay();
         return () => cancelAnimationFrame(animationId);
-    }, [enrolledPlates, isScanning, lastDetectedPlate]);
+    }, [enrolledPlates, enrolledTargets, isScanning, lastMatch]);
 
     return (
         <div className="relative w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden">
@@ -272,6 +344,12 @@ export default function CameraFeed({
                 </div>
             )}
 
+            {aiBackendOffline && (
+                <div className="absolute z-20 p-2 bg-rose-950/90 border border-rose-800 text-rose-300 text-[11px] font-mono rounded top-16 right-3">
+                    ⚠️ AI Server (Port 8002) Offline
+                </div>
+            )}
+
             {streamUrl ? (
                 <img
                     ref={imgRef}
@@ -292,8 +370,6 @@ export default function CameraFeed({
 
             <canvas
                 ref={canvasRef}
-                width={640}
-                height={480}
                 className="absolute inset-0 w-full h-full pointer-events-none z-10"
             />
         </div>

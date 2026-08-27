@@ -59,8 +59,24 @@ const CENTRAL_WS_URL = 'ws://localhost:8000/ws/alerts';
 export default function App() {
   const [engineMode, setEngineMode] = useState('CLIENT-SIDE');
   const [alerts, setAlerts] = useState([]);
-  const [localAlerts, setLocalAlerts] = useState([]);
+  const [localAlerts, setLocalAlerts] = useState(() => {
+    try {
+      const saved = localStorage.getItem('watchlist_alerts');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
   const [connected, setConnected] = useState(false);
+
+  // Persist localAlerts in localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('watchlist_alerts', JSON.stringify(localAlerts));
+    } catch (e) {
+      console.warn("Failed to persist alerts in localStorage:", e);
+    }
+  }, [localAlerts]);
 
   // Watchlist & Enrollment states (Face + Plate)
   const [enrollForm, setEnrollForm] = useState({ name: '', targetPlate: '' });
@@ -93,7 +109,14 @@ export default function App() {
   const [enrolledTargets, setEnrolledTargets] = useState(() => {
     try {
       const saved = localStorage.getItem('watchlist_targets');
-      return saved ? JSON.parse(saved) : [];
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      // Clean up stale blob URLs from previous code version to prevent backend failure on reload
+      const valid = parsed.filter(t => t && t.imageSrc && !t.imageSrc.startsWith('blob:'));
+      if (valid.length !== parsed.length) {
+        localStorage.setItem('watchlist_targets', JSON.stringify(valid));
+      }
+      return valid;
     } catch (e) {
       return [];
     }
@@ -109,6 +132,27 @@ export default function App() {
   });
 
   const ws = useRef(null);
+  const [aiBackendOnline, setAiBackendOnline] = useState(false);
+
+  // Background health check for the AI Scan server on port 8002
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const res = await fetch('http://localhost:8002/');
+        if (res.ok) {
+          setAiBackendOnline(true);
+        } else {
+          setAiBackendOnline(false);
+        }
+      } catch (e) {
+        setAiBackendOnline(false);
+      }
+    };
+    
+    checkBackend();
+    const interval = setInterval(checkBackend, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // 1. Update triggerGpsSync in App.jsx to gracefully fallback instead of erroring
   const triggerGpsSync = () => {
@@ -124,12 +168,26 @@ export default function App() {
           setGpsError(null);
         },
         (err) => {
-          console.warn("Browser GPS failed, using default node coordinates:", err);
-          // Fall back gracefully to location.js config coordinates
-          setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-          setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-          setLocationSource('STATIC NODE');
-          setGpsError(null); // Clear error block
+          console.warn("Browser GPS failed, trying IP-based geolocation fallback:", err);
+          fetch('https://ipapi.co/json/')
+            .then(res => res.json())
+            .then(data => {
+              if (data.latitude && data.longitude) {
+                const userCoords = [data.latitude, data.longitude];
+                setLaptopLocation(userCoords);
+                setMapCenter(userCoords);
+                setLocationSource('IP GEOLOCATION');
+                setGpsError(null);
+              } else {
+                throw new Error("Invalid IP geo data");
+              }
+            })
+            .catch(ipErr => {
+              console.warn("IP Geolocation failed too, falling back to static config:", ipErr);
+              setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+              setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+              setLocationSource('STATIC NODE');
+            });
         },
         { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
       );
@@ -340,15 +398,19 @@ export default function App() {
 
     setEnrollStatus({ loading: true, success: null, error: null });
 
-    // Enroll Face Target
+    // Enroll Face Target with Base64 encoding
     if (enrollForm.name && selectedFile) {
-      const newTarget = {
-        name: enrollForm.name,
-        imageSrc: URL.createObjectURL(selectedFile)
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const newTarget = {
+          name: enrollForm.name,
+          imageSrc: reader.result // Base64 data string accessible across components
+        };
+        const updatedTargets = [...enrolledTargets, newTarget];
+        setEnrolledTargets(updatedTargets);
+        localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
       };
-      const updatedTargets = [...enrolledTargets, newTarget];
-      setEnrolledTargets(updatedTargets);
-      localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
+      reader.readAsDataURL(selectedFile);
     }
 
     // Enroll License Plate Target
@@ -361,13 +423,14 @@ export default function App() {
 
     setEnrollStatus({
       loading: false,
-      success: `Target(s) enrolled! Live feeds are monitoring for matches.`,
+      success: `Target(s) enrolled successfully!`,
       error: null
     });
 
     setEnrollForm({ name: '', targetPlate: '' });
     setSelectedFile(null);
   };
+
 
   const activeAlerts = engineMode === 'CLIENT-SIDE' ? localAlerts : alerts;
 
@@ -397,6 +460,11 @@ export default function App() {
             >
               ADD IP CAMERA / FOG
             </button>
+          </div>
+
+          <div className={`px-4 py-1.5 rounded-full border text-xs font-semibold flex items-center gap-2 ${aiBackendOnline ? 'bg-emerald-950/30 border-emerald-800/50 text-emerald-400' : 'bg-rose-950/30 border-rose-800/50 text-rose-400'}`}>
+            <span className={`w-2.5 h-2.5 rounded-full ${aiBackendOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}></span>
+            AI SERVER: {aiBackendOnline ? 'ONLINE' : 'OFFLINE'}
           </div>
 
           <div className="px-4 py-1.5 rounded-full border text-xs font-semibold flex items-center gap-2 bg-cyan-950/30 border-cyan-800/50 text-cyan-400">
@@ -623,9 +691,22 @@ export default function App() {
               <Bell className="w-4 h-4 text-blue-400" />
               Interactive Alerts Feed
             </h2>
-            <span className="text-[10px] text-slate-500 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-              {activeAlerts.length} Records
-            </span>
+            <div className="flex items-center gap-2">
+              {engineMode === 'CLIENT-SIDE' && localAlerts.length > 0 && (
+                <button
+                  onClick={() => {
+                    setLocalAlerts([]);
+                    localStorage.removeItem('watchlist_alerts');
+                  }}
+                  className="text-[10px] text-rose-400 hover:text-rose-300 font-bold uppercase tracking-wider transition-colors bg-slate-950 border border-slate-800 px-2 py-0.5 rounded cursor-pointer"
+                >
+                  Clear
+                </button>
+              )}
+              <span className="text-[10px] text-slate-500 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                {activeAlerts.length} Records
+              </span>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto space-y-4 pr-2 pb-6">

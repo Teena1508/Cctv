@@ -1,8 +1,14 @@
 import os
+import sys
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
+
+# Set PYTHONPATH to resolve ingestion module
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
 
 from ingestion.stream import RTSPConnector
 from ingestion.config import load_config, append_camera_config

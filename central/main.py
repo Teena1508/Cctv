@@ -164,8 +164,8 @@ def save_mqtt_alert(payload: dict):
             severity=severity,
             details=details,
             status="PENDING",
-            lat=37.7749,  # Default spatial coordinate falls to control center center
-            lng=-122.4194,
+            lat=payload.get("lat", 37.7749),  # Default falls to control center center
+            lng=payload.get("lng", -122.4194),
             extra_info=f"Confidence: {confidence:.2f}"
         )
         db.add(db_alert)
@@ -306,7 +306,10 @@ def acknowledge_alert(alert_id: int, db: Session = Depends(get_db)):
     # Remove from Redis to block escalation
     if redis_client:
         redis_key = f"escalation:pending:{alert_id}"
-        redis_client.delete(redis_key)
+        try:
+            redis_client.delete(redis_key)
+        except Exception as e:
+            print(f"[Central Redis] Error deleting key: {e}")
         
     # Broadcast status change to WebSockets
     ack_payload = {
@@ -317,12 +320,10 @@ def acknowledge_alert(alert_id: int, db: Session = Depends(get_db)):
     }
     
     # Notify active dashboard listeners
-    for connection in manager.active_connections:
-        try:
-            import asyncio
-            asyncio.run(connection.send_json(ack_payload))
-        except Exception:
-            pass
+    try:
+        manager.broadcast_sync(ack_payload)
+    except Exception as e:
+        print(f"[Central WS] Error broadcasting status change: {e}")
             
     print(f"[Central API] Alert #{alert_id} acknowledged. Prevented escalation.")
     return {"status": "success", "message": f"Alert #{alert_id} acknowledged successfully."}
@@ -443,3 +444,61 @@ def video_feed_slot(camera_slot: str):
         raise HTTPException(status_code=404, detail="Camera slot not connected")
     connector = active_connectors[camera_slot]
     return StreamingResponse(gen_rtsp_frames(connector), media_type="multipart/x-mixed-replace; boundary=frame")
+
+# =========================================================================
+# AI Scanning Endpoints (Face & Plate Recognition)
+# =========================================================================
+from fastapi import File, Form, UploadFile
+
+@app.post("/api/scan-face")
+async def scan_face(
+    file: UploadFile = File(...),
+    targets: str = Form(...)
+):
+    """Processes facial recognition on incoming webcam frames."""
+    try:
+        # Read uploaded image bytes
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return {"matches": []}
+
+        # Convert BGR (OpenCV format) to RGB for facial recognition processing
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Parse targets payload sent from React
+        try:
+            target_list = json.loads(targets)
+        except Exception:
+            target_list = []
+
+        matches = []
+        # TODO: Replace/extend this section with your facial recognition engine (e.g. face_recognition / dlib / insightface)
+        # Example:
+        # face_locations = face_recognition.face_locations(rgb_frame)
+        # face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+
+        return {"matches": matches}
+    except Exception as e:
+        print(f"[Central Face API] Error: {e}")
+        return {"matches": []}
+
+@app.post("/api/scan-plate")
+async def scan_plate(file: UploadFile = File(...)):
+    """Processes license plate recognition on incoming webcam frames."""
+    try:
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return {"results": []}
+
+        # TODO: Replace/extend this section with your ANPR engine (e.g., EasyOCR / PaddleOCR / OpenALPR)
+        results = []
+        return {"results": results}
+    except Exception as e:
+        print(f"[Central ANPR API] Error: {e}")
+        return {"results": []}

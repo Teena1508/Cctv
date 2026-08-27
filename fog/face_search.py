@@ -2,7 +2,7 @@ import os
 from pymilvus import MilvusClient, DataType
 
 class FaceSearcher:
-    def __init__(self, host="localhost", port=19530, collection_name="face_recognition"):
+    def __init__(self, host="localhost", port=19530, collection_name="watchlist_faces"):
         self.uri = f"http://{host}:{port}"
         self.collection_name = collection_name
         self.client = None
