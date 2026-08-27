@@ -1,0 +1,23 @@
+# Common Python requirements for CCTV Surveillance Platform
+
+# Computer Vision & Deep Learning
+opencv-python-headless>=4.8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
+insightface>=0.7.3
+onnxruntime>=1.15.0
+
+# Messaging & Database Client APIs
+paho-mqtt>=1.6.1
+pymilvus>=2.4.0
+redis>=5.0.0
+psycopg2-binary>=2.9.0
+
+# Backend & Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+websockets>=11.0.0
+pydantic>=2.0.0
+requests>=2.31.0
+sqlalchemy
