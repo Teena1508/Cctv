@@ -39,6 +39,21 @@ const userLocationIcon = new L.DivIcon({
   popupAnchor: [0, -16]
 });
 
+const alertIcon = new L.DivIcon({
+  className: 'custom-alert-icon',
+  html: `<div class="relative flex items-center justify-center w-9 h-9 rounded-full bg-slate-950 border-2 border-rose-500 shadow-2xl text-rose-500">
+    <span class="absolute w-14 h-14 rounded-full border-2 border-rose-500/50 animate-ping"></span>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      <line x1="12" y1="9" x2="12" y2="13"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  </div>`,
+  iconSize: [36, 36],
+  iconAnchor: [18, 18],
+  popupAnchor: [0, -18]
+});
+
 
 // Helper component to center map dynamically & fix tile offset issues
 function RecenterMap({ coords }) {
@@ -53,8 +68,10 @@ function RecenterMap({ coords }) {
   return null;
 }
 
-const CENTRAL_API_URL = 'http://localhost:8000/api/alerts';
-const CENTRAL_WS_URL = 'ws://localhost:8000/ws/alerts';
+const CENTRAL_API_BASE = import.meta.env.VITE_CENTRAL_API_URL || 'http://localhost:8000';
+const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
+const CENTRAL_API_URL = `${CENTRAL_API_BASE}/api/alerts`;
+const CENTRAL_WS_URL = import.meta.env.VITE_CENTRAL_WS_URL || 'ws://localhost:8000/ws/alerts';
 
 export default function App() {
   const [engineMode, setEngineMode] = useState('CLIENT-SIDE');
@@ -132,20 +149,25 @@ export default function App() {
   });
 
   const ws = useRef(null);
-  const [aiBackendOnline, setAiBackendOnline] = useState(false);
+  const [aiBackendOnline, setAiBackendOnline] = useState(true);
+  const [aiBackendLabel, setAiBackendLabel] = useState('ONLINE (PYTHON BACKEND)');
 
-  // Background health check for the AI Scan server on port 8002
+  // Background health check for the AI Scan server on port 8002 (or deployed URL)
   useEffect(() => {
     const checkBackend = async () => {
       try {
-        const res = await fetch('http://localhost:8002/');
+        const res = await fetch(`${AI_BACKEND_BASE}/`);
         if (res.ok) {
           setAiBackendOnline(true);
+          setAiBackendLabel('ONLINE (PYTHON BACKEND)');
         } else {
-          setAiBackendOnline(false);
+          setAiBackendOnline(true);
+          setAiBackendLabel('ONLINE (BROWSER AI)');
         }
       } catch (e) {
-        setAiBackendOnline(false);
+        // Live deployment fallback to client-side browser AI
+        setAiBackendOnline(true);
+        setAiBackendLabel('ONLINE (BROWSER AI)');
       }
     };
     
@@ -154,52 +176,88 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // 1. Update triggerGpsSync in App.jsx to gracefully fallback instead of erroring
+  // Update triggerGpsSync in App.jsx to try high accuracy, fallback to low accuracy, and display clear error notifications
   const triggerGpsSync = () => {
     setGpsError(null);
     setLocationSource('ACQUIRING GPS...');
-    if ('geolocation' in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const userCoords = [pos.coords.latitude, pos.coords.longitude];
-          setLaptopLocation(userCoords);
-          setMapCenter(userCoords);
-          setLocationSource('GPS LOCK');
-          setGpsError(null);
-        },
-        (err) => {
-          console.warn("Browser GPS failed, trying IP-based geolocation fallback:", err);
-          fetch('https://ipapi.co/json/')
-            .then(res => res.json())
-            .then(data => {
-              if (data.latitude && data.longitude) {
-                const userCoords = [data.latitude, data.longitude];
-                setLaptopLocation(userCoords);
-                setMapCenter(userCoords);
-                setLocationSource('IP GEOLOCATION');
-                setGpsError(null);
-              } else {
-                throw new Error("Invalid IP geo data");
-              }
-            })
-            .catch(ipErr => {
-              console.warn("IP Geolocation failed too, falling back to static config:", ipErr);
-              setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-              setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-              setLocationSource('STATIC NODE');
-            });
-        },
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-      );
-    } else {
+    
+    if (!('geolocation' in navigator)) {
       setLocationSource('STATIC NODE');
+      setGpsError("Geolocation is not supported by your browser.");
+      return;
     }
+
+    const optionsHigh = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
+    const optionsLow = { enableHighAccuracy: false, timeout: 5000, maximumAge: 0 };
+
+    const handleSuccess = (pos) => {
+      const userCoords = [pos.coords.latitude, pos.coords.longitude];
+      setLaptopLocation(userCoords);
+      setMapCenter(userCoords);
+      setLocationSource('GPS LOCK');
+      setGpsError(null);
+    };
+
+    const handleIpFallback = (err) => {
+      console.warn("Browser GPS failed, trying IP-based geolocation fallback:", err);
+      
+      let errorMsg = "GPS failed. Using IP fallback.";
+      if (err.code === 1) {
+        errorMsg = "GPS blocked. Please allow location permissions in your browser address bar.";
+      } else if (err.code === 2) {
+        errorMsg = "GPS unavailable. Check device settings.";
+      } else if (err.code === 3) {
+        errorMsg = "GPS timed out. Trying IP lookup.";
+      }
+      setGpsError(errorMsg);
+
+      fetch('http://ip-api.com/json/')
+        .then(res => res.json())
+        .then(data => {
+          if (data.lat && data.lon) {
+            const userCoords = [data.lat, data.lon];
+            setLaptopLocation(userCoords);
+            setMapCenter(userCoords);
+            setLocationSource('IP GEOLOCATION');
+          } else {
+            throw new Error("Invalid IP geo data");
+          }
+        })
+        .catch(ipErr => {
+          console.warn("IP Geolocation failed too, falling back to static config:", ipErr);
+          setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+          setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+          setLocationSource('STATIC NODE');
+        });
+    };
+
+    // Try high accuracy first
+    navigator.geolocation.getCurrentPosition(
+      handleSuccess,
+      (errHigh) => {
+        if (errHigh.code === 1) {
+          // If permission is explicitly denied, don't try low accuracy, go to fallback
+          handleIpFallback(errHigh);
+        } else {
+          console.warn("High accuracy GPS failed/timed out, retrying with low accuracy...", errHigh);
+          navigator.geolocation.getCurrentPosition(
+            handleSuccess,
+            (errLow) => {
+              handleIpFallback(errLow);
+            },
+            optionsLow
+          );
+        }
+      },
+      optionsHigh
+    );
   };
 
   // Watch precise live GPS coordinates of device in real-time
   useEffect(() => {
     let watchId = null;
     if ('geolocation' in navigator) {
+      // Use low accuracy watchPosition for continuous tracking on laptop to prevent constant timeouts/failures
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const userCoords = [pos.coords.latitude, pos.coords.longitude];
@@ -211,7 +269,7 @@ export default function App() {
         (err) => {
           console.warn("watchPosition background tracking failed:", err);
         },
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        { enableHighAccuracy: false, timeout: 15000, maximumAge: 10000 }
       );
     }
 
@@ -464,7 +522,7 @@ export default function App() {
 
           <div className={`px-4 py-1.5 rounded-full border text-xs font-semibold flex items-center gap-2 ${aiBackendOnline ? 'bg-emerald-950/30 border-emerald-800/50 text-emerald-400' : 'bg-rose-950/30 border-rose-800/50 text-rose-400'}`}>
             <span className={`w-2.5 h-2.5 rounded-full ${aiBackendOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}></span>
-            AI SERVER: {aiBackendOnline ? 'ONLINE' : 'OFFLINE'}
+            AI SERVER: {aiBackendLabel}
           </div>
 
           <div className="px-4 py-1.5 rounded-full border text-xs font-semibold flex items-center gap-2 bg-cyan-950/30 border-cyan-800/50 text-cyan-400">
@@ -545,20 +603,20 @@ export default function App() {
           </section>
 
           {/* Leaflet Spatio-Temporal Map */}
-          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5 flex-1 min-h-[280px] flex flex-col gap-3">
+          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5 flex-1 min-h-[380px] flex flex-col gap-3">
             <h2 className="text-sm font-semibold text-slate-400 uppercase flex items-center gap-2">
               <Layers className="w-4 h-4 text-blue-400" />
               Spatio-Temporal GIS Map
             </h2>
-            <div className="flex-1 w-full bg-slate-950 rounded-lg relative border border-slate-800 overflow-hidden min-h-[200px]">
+            <div className="flex-1 w-full bg-slate-950 rounded-lg relative border border-slate-800 overflow-hidden min-h-[300px]">
               <MapContainer
                 center={mapCenter}
                 zoom={14}
                 scrollWheelZoom={true}
-                className="w-full h-full min-h-[200px] z-0"
+                className="w-full h-full min-h-[300px] z-0"
               >
                 <TileLayer
-                  attribution='&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a>'
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                   url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
                 <RecenterMap coords={mapCenter} />
@@ -581,10 +639,10 @@ export default function App() {
                     }}
                   >
                     <Popup>
-                      <div className="text-xs font-mono font-bold text-slate-800">
-                        💻 YOUR CURRENT LAPTOP LOCATION<br />
-                        GPS: {laptopLocation[0].toFixed(5)}, {laptopLocation[1].toFixed(5)}<br />
-                        <span className="text-blue-500 font-normal">(Drag to refine location)</span>
+                      <div className="text-xs font-mono text-slate-200">
+                        <div className="font-bold text-cyan-400">💻 CURRENT LAPTOP LOCATION</div>
+                        <div className="mt-1">GPS: {laptopLocation[0].toFixed(5)}, {laptopLocation[1].toFixed(5)}</div>
+                        <div className="text-blue-400 text-[10px] mt-1 font-normal">(Drag to refine location)</div>
                       </div>
                     </Popup>
                   </Marker>
@@ -594,14 +652,39 @@ export default function App() {
                 {cameras.map((cam) => (
                   <Marker key={cam.id} position={[cam.lat, cam.lng]} icon={cameraIcon}>
                     <Popup>
-                      <div className="text-xs font-mono font-bold text-slate-800">
-                        📹 {cam.id} // {cam.name}<br />
-                        📍 {cam.address}<br />
-                        GPS: {cam.lat.toFixed(5)}, {cam.lng.toFixed(5)}
+                      <div className="text-xs font-mono text-slate-200">
+                        <div className="font-bold text-blue-400">📹 {cam.id} // {cam.name}</div>
+                        <div className="mt-1">📍 {cam.address}</div>
+                        <div className="mt-0.5">GPS: {cam.lat.toFixed(5)}, {cam.lng.toFixed(5)}</div>
                       </div>
                     </Popup>
                   </Marker>
                 ))}
+
+                {/* Plot active alerts */}
+                {activeAlerts.map((alert, idx) => {
+                  if (!alert.lat || !alert.lng) return null;
+                  return (
+                    <Marker
+                      key={alert.id || alert.timestamp || idx}
+                      position={[alert.lat, alert.lng]}
+                      icon={alertIcon}
+                    >
+                      <Popup>
+                        <div className="text-xs font-mono text-slate-200">
+                          <div className="font-bold text-rose-500 uppercase flex items-center gap-1.5 mb-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                            🚨 {alert.event_type || 'ALERT DETECTED'}
+                          </div>
+                          <div className="text-slate-300"><strong>TARGET:</strong> {alert.subject || 'UNKNOWN'}</div>
+                          <div className="text-slate-300"><strong>SEVERITY:</strong> {alert.severity || 'HIGH'}</div>
+                          <div className="text-slate-300"><strong>DETAILS:</strong> {alert.details || ''}</div>
+                          <div className="text-slate-400 text-[10px] mt-1"><strong>TIME:</strong> {alert.timestamp}</div>
+                        </div>
+                      </Popup>
+                    </Marker>
+                  );
+                })}
               </MapContainer>
 
               {/* Map Info Overlay Card */}

@@ -23,6 +23,23 @@ if ROOT_DIR not in sys.path:
 from ingestion.stream import RTSPConnector
 from ingestion.config import append_camera_config
 
+def load_configured_location():
+    try:
+        import re
+        central_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(central_dir)
+        loc_file = os.path.join(root_dir, "dashboard", "src", "config", "location.js")
+        if os.path.exists(loc_file):
+            with open(loc_file, "r") as f:
+                content = f.read()
+            lat_match = re.search(r"lat\s*:\s*([\d\.-]+)", content)
+            lng_match = re.search(r"lng\s*:\s*([\d\.-]+)", content)
+            if lat_match and lng_match:
+                return float(lat_match.group(1)), float(lng_match.group(1))
+    except Exception as e:
+        print(f"[Central Location Ingest] Error reading location.js: {e}")
+    return 28.6139, 77.2090
+
 # FastAPI App setup
 app = FastAPI(title="Central Surveillance Management Hub", version="2.0.0")
 
@@ -157,6 +174,7 @@ def save_mqtt_alert(payload: dict):
 
     db = SessionLocal()
     try:
+        fallback_lat, fallback_lng = load_configured_location()
         # Save to database
         db_alert = Alert(
             node_id=camera_id,
@@ -164,8 +182,8 @@ def save_mqtt_alert(payload: dict):
             severity=severity,
             details=details,
             status="PENDING",
-            lat=payload.get("lat", 37.7749),  # Default falls to control center center
-            lng=payload.get("lng", -122.4194),
+            lat=payload.get("lat") if payload.get("lat") is not None else fallback_lat,
+            lng=payload.get("lng") if payload.get("lng") is not None else fallback_lng,
             extra_info=f"Confidence: {confidence:.2f}"
         )
         db.add(db_alert)

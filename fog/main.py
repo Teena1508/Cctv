@@ -66,10 +66,11 @@ def load_configured_location():
 
 def get_ip_location():
     try:
-        r = requests.get('https://ipapi.co/json/', timeout=3.0)
+        r = requests.get('http://ip-api.com/json/', timeout=3.0)
         if r.status_code == 200:
             data = r.json()
-            return float(data.get("latitude")), float(data.get("longitude"))
+            if data.get("status") == "success":
+                return float(data.get("lat")), float(data.get("lon"))
     except Exception:
         pass
     return None, None
