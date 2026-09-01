@@ -15,6 +15,55 @@ function formatExactTimestamp(dateObj = new Date()) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${ms}`;
 }
 
+const targetSignatureCache = new Map();
+
+function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16) {
+    try {
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = targetWidth;
+        offCanvas.height = targetHeight;
+        const ctx = offCanvas.getContext('2d');
+        ctx.drawImage(imgSource, 0, 0, targetWidth, targetHeight);
+        const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
+        
+        const vec = new Float32Array(targetWidth * targetHeight);
+        for (let i = 0; i < vec.length; i++) {
+            const r = imgData[i * 4];
+            const g = imgData[i * 4 + 1];
+            const b = imgData[i * 4 + 2];
+            vec[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+        }
+
+        let sumSq = 0;
+        for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+        const norm = Math.sqrt(sumSq);
+        if (norm > 0) {
+            for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+        }
+        return vec;
+    } catch (e) {
+        return null;
+    }
+}
+
+function getTargetImageSignature(imageSrc) {
+    if (!imageSrc) return Promise.resolve(null);
+    if (targetSignatureCache.has(imageSrc)) {
+        return Promise.resolve(targetSignatureCache.get(imageSrc));
+    }
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            const sig = getCanvasImageSignature(img);
+            if (sig) targetSignatureCache.set(imageSrc, sig);
+            resolve(sig);
+        };
+        img.onerror = () => resolve(null);
+        img.src = imageSrc;
+    });
+}
+
 export default function CameraFeed({
     cameraId = 'CAM_01',
     cameraName = 'DOWNTOWN_NODE',
@@ -249,9 +298,48 @@ export default function CameraFeed({
                             throw new Error("Backend offline");
                         }
                     } catch (err) {
-                        // Client-side Browser AI Fallback for Live Deployed App
+                        // Client-side Browser AI Engine for Vercel / Live Deployments
                         setAiBackendOffline(false);
-                        // Strict mode: Only backend verified high-confidence face matches trigger alerts
+                        const mediaSource = videoRef.current || imgRef.current;
+                        if (mediaSource) {
+                            const frameSig = getCanvasImageSignature(mediaSource);
+                            if (frameSig) {
+                                const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
+                                for (const target of targetList) {
+                                    if (target.imageSrc) {
+                                        const targetSig = await getTargetImageSignature(target.imageSrc);
+                                        if (targetSig) {
+                                            let dot = 0;
+                                            for (let i = 0; i < frameSig.length; i++) {
+                                                dot += frameSig[i] * targetSig[i];
+                                            }
+                                            if (dot >= 0.72) {
+                                                const targetName = target.name || 'WATCHLIST TARGET';
+                                                const exactTime = formatExactTimestamp(new Date());
+                                                setLastMatch(`TARGET: ${targetName}`);
+                                                if (onDetectionRef.current) {
+                                                    onDetectionRef.current({
+                                                        id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                                        eventType: 'TARGET MATCH',
+                                                        subject: targetName,
+                                                        details: `Live Browser AI matched target portrait on ${cameraId}`,
+                                                        lat: activeLoc.lat,
+                                                        lng: activeLoc.lng,
+                                                        address: activeLoc.address,
+                                                        cameraId: cameraId,
+                                                        cameraName: cameraName,
+                                                        timestamp: exactTime,
+                                                        confidence: Math.round(dot * 100),
+                                                        severity: 'CRITICAL',
+                                                    });
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
