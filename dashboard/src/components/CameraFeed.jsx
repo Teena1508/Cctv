@@ -17,28 +17,50 @@ function formatExactTimestamp(dateObj = new Date()) {
 
 const targetSignatureCache = new Map();
 
-function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16) {
+function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16, cropBox = null) {
     try {
         const offCanvas = document.createElement('canvas');
         offCanvas.width = targetWidth;
         offCanvas.height = targetHeight;
         const ctx = offCanvas.getContext('2d');
-        ctx.drawImage(imgSource, 0, 0, targetWidth, targetHeight);
-        const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
         
+        const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
+        const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
+
+        if (cropBox && srcW > 0 && srcH > 0) {
+            const sx = srcW * cropBox.x;
+            const sy = srcH * cropBox.y;
+            const sw = srcW * cropBox.w;
+            const sh = srcH * cropBox.h;
+            ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+        } else {
+            ctx.drawImage(imgSource, 0, 0, targetWidth, targetHeight);
+        }
+
+        const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
         const vec = new Float32Array(targetWidth * targetHeight);
+        
+        let sum = 0;
         for (let i = 0; i < vec.length; i++) {
             const r = imgData[i * 4];
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
-            vec[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+            const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+            vec[i] = lum;
+            sum += lum;
         }
 
+        // Zero-mean centering: Subtract average brightness to eliminate background/room lighting bias
+        const mean = sum / vec.length;
         let sumSq = 0;
-        for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
-        const norm = Math.sqrt(sumSq);
-        if (norm > 0) {
-            for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+        for (let i = 0; i < vec.length; i++) {
+            vec[i] -= mean;
+            sumSq += vec[i] * vec[i];
+        }
+
+        const std = Math.sqrt(sumSq);
+        if (std > 0.0001) {
+            for (let i = 0; i < vec.length; i++) vec[i] /= std;
         }
         return vec;
     } catch (e) {
@@ -55,7 +77,7 @@ function getTargetImageSignature(imageSrc) {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = () => {
-            const sig = getCanvasImageSignature(img);
+            const sig = getCanvasImageSignature(img, 16, 16, null);
             if (sig) targetSignatureCache.set(imageSrc, sig);
             resolve(sig);
         };
@@ -302,7 +324,8 @@ export default function CameraFeed({
                         setAiBackendOffline(false);
                         const mediaSource = videoRef.current || imgRef.current;
                         if (mediaSource) {
-                            const frameSig = getCanvasImageSignature(mediaSource);
+                            // Extract zero-centered facial region signature from central scanner zone
+                            const frameSig = getCanvasImageSignature(mediaSource, 16, 16, { x: 0.25, y: 0.20, w: 0.50, h: 0.60 });
                             if (frameSig) {
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
                                 for (const target of targetList) {
@@ -313,7 +336,8 @@ export default function CameraFeed({
                                             for (let i = 0; i < frameSig.length; i++) {
                                                 dot += frameSig[i] * targetSig[i];
                                             }
-                                            if (dot >= 0.72) {
+                                            // Strict zero-centered Pearson threshold (0.78) blocks random faces & room backgrounds
+                                            if (dot >= 0.78) {
                                                 const targetName = target.name || 'WATCHLIST TARGET';
                                                 const exactTime = formatExactTimestamp(new Date());
                                                 setLastMatch(`TARGET: ${targetName}`);
