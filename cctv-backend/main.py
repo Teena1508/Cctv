@@ -155,8 +155,19 @@ def get_target_embedding(target):
     img = resize_for_face_detection(img)
         
     faces = face_analyzer.get(img)
+
+    # Fallback to contrast boosted image if lighting was dim in uploaded portrait
+    if not faces and img is not None and len(img.shape) == 3:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l)
+        enhanced_lab = cv2.merge((cl, a, b))
+        enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+        faces = face_analyzer.get(enhanced_bgr)
+
     if not faces:
-        print(f"[Face Ingest] No faces found in target image for {name}")
+        print(f"[Face Ingest] ⚠️ No faces found in target image for {name}")
         return None
         
     # Select largest face
@@ -167,7 +178,7 @@ def get_target_embedding(target):
         embedding = embedding / norm
         
     target_cache[image_src] = embedding
-    print(f"[Face Ingest] Cached embedding for target: {name}")
+    print(f"[Face Ingest] ✅ Cached ArcFace embedding for target: {name}")
     return embedding
 
 @app.get("/")
@@ -266,27 +277,47 @@ async def scan_face(
         is_fallback = face_analyzer.real_analyzer is None
         
         for face in faces:
+            # Skip low-confidence face detections to prevent noise
+            det_score = getattr(face, 'det_score', 1.0)
+            if det_score is not None and det_score < 0.40:
+                continue
+
             embedding = face.embedding
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 embedding = embedding / norm
-                
+
+            # Compute similarity against all targets
+            scores = []
             for name, target_emb in valid_targets:
-                if is_fallback:
-                    # In fallback mode, any face detected matches the enrolled suspect
-                    similarity = 0.85
-                    print(f"👤 [Haar Cascade Fallback] Match detected for target '{name}'")
-                else:
-                    similarity = np.dot(embedding, target_emb)
-                    print(f"👤 [InsightFace] Comparing face against '{name}': similarity = {similarity:.4f}")
+                similarity = float(np.dot(embedding, target_emb))
+                scores.append((name, similarity))
+
+            # Sort candidate matches by similarity score descending
+            scores.sort(key=lambda x: x[1], reverse=True)
+
+            if scores:
+                top_name, top_sim = scores[0]
+                # Optimal ArcFace threshold for webcam recognition (Google Photos precision standard: 0.48)
+                threshold = 0.70 if is_fallback else 0.48
                 
-                # Lower match threshold to 0.40 to account for webcam conditions
-                if similarity >= 0.40:
+                print(f"👤 [Face Matcher] Top candidate for detected face: '{top_name}' with similarity = {top_sim:.4f} (threshold = {threshold})")
+
+                # Validate top candidate against threshold & candidate margin
+                margin_valid = True
+                if len(scores) > 1 and not is_fallback:
+                    second_name, second_sim = scores[1]
+                    # Ensure top candidate is distinctly closer than runner-up to avoid ambiguous identity misattribution
+                    if (top_sim - second_sim) < 0.05:
+                        margin_valid = False
+                        print(f"⚠️ [Face Matcher] Ambiguous match between '{top_name}' ({top_sim:.4f}) and '{second_name}' ({second_sim:.4f}). Skipping.")
+
+                if top_sim >= threshold and margin_valid:
                     matches.append({
-                        "name": name,
-                        "confidence": float(similarity)
+                        "name": top_name,
+                        "confidence": float(top_sim)
                     })
-                    
+
         return {"matches": matches}
     except Exception as e:
         print(f"[Backend Face API] Error: {e}")

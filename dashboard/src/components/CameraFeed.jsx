@@ -204,27 +204,7 @@ export default function CameraFeed({
                     } catch (err) {
                         // Client-side Browser AI Fallback for Live Deployed App
                         setAiBackendOffline(false);
-                        const matchedPlate = plates[Math.floor(Math.random() * plates.length)];
-                        if (matchedPlate && Math.random() > 0.6) {
-                            const exactTime = formatExactTimestamp(new Date());
-                            setLastMatch(`PLATE: ${matchedPlate}`);
-                            if (onDetectionRef.current) {
-                                onDetectionRef.current({
-                                    id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                    eventType: 'PLATE MATCH',
-                                    subject: matchedPlate,
-                                    details: `Browser AI identified target plate on ${cameraId}`,
-                                    lat: activeLoc.lat,
-                                    lng: activeLoc.lng,
-                                    address: activeLoc.address,
-                                    cameraId: cameraId,
-                                    cameraName: cameraName,
-                                    timestamp: exactTime,
-                                    confidence: 92,
-                                    severity: 'CRITICAL',
-                                });
-                            }
-                        }
+                        // Require backend API connection for face matching or verified canvas match
                     }
                 }
 
@@ -252,14 +232,14 @@ export default function CameraFeed({
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'TARGET MATCH',
                                             subject: face.name || face.label,
-                                            details: `Facial match identified on ${cameraId}`,
+                                            details: `High-confidence facial match identified on ${cameraId}`,
                                             lat: activeLoc.lat,
                                             lng: activeLoc.lng,
                                             address: activeLoc.address,
                                             cameraId: cameraId,
                                             cameraName: cameraName,
                                             timestamp: exactTime,
-                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 90,
+                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
                                             severity: 'CRITICAL',
                                         });
                                     }
@@ -271,29 +251,7 @@ export default function CameraFeed({
                     } catch (err) {
                         // Client-side Browser AI Fallback for Live Deployed App
                         setAiBackendOffline(false);
-                        const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
-                        const matchedTarget = targetList && targetList.length > 0 ? targetList[Math.floor(Math.random() * targetList.length)] : null;
-                        if (matchedTarget && Math.random() > 0.5) {
-                            const targetName = matchedTarget.name || matchedTarget.label || 'WATCHLIST TARGET';
-                            const exactTime = formatExactTimestamp(new Date());
-                            setLastMatch(`TARGET: ${targetName}`);
-                            if (onDetectionRef.current) {
-                                onDetectionRef.current({
-                                    id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                    eventType: 'TARGET MATCH',
-                                    subject: targetName,
-                                    details: `Browser AI matched target portrait on ${cameraId}`,
-                                    lat: activeLoc.lat,
-                                    lng: activeLoc.lng,
-                                    address: activeLoc.address,
-                                    cameraId: cameraId,
-                                    cameraName: cameraName,
-                                    timestamp: exactTime,
-                                    confidence: 88,
-                                    severity: 'CRITICAL',
-                                });
-                            }
-                        }
+                        // Strict mode: Only backend verified high-confidence face matches trigger alerts
                     }
                 }
 
