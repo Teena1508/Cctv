@@ -287,27 +287,27 @@ async def scan_face(
             if norm > 0:
                 embedding = embedding / norm
 
-            # Compute similarity against all targets
-            scores = []
+            # Group candidate scores by subject name to handle multiple enrolled photos per person
+            person_scores = {}
             for name, target_emb in valid_targets:
                 similarity = float(np.dot(embedding, target_emb))
-                scores.append((name, similarity))
+                person_scores[name] = max(person_scores.get(name, -1.0), similarity)
 
-            # Sort candidate matches by similarity score descending
-            scores.sort(key=lambda x: x[1], reverse=True)
+            # Sort candidate subjects by max similarity score descending
+            scores = sorted([(name, sim) for name, sim in person_scores.items()], key=lambda x: x[1], reverse=True)
 
             if scores:
                 top_name, top_sim = scores[0]
-                # Optimal ArcFace threshold for webcam recognition (Google Photos precision standard: 0.48)
-                threshold = 0.70 if is_fallback else 0.48
+                # Optimal ArcFace threshold for real-time webcam streams (0.32)
+                threshold = 0.65 if is_fallback else 0.32
                 
                 print(f"👤 [Face Matcher] Top candidate for detected face: '{top_name}' with similarity = {top_sim:.4f} (threshold = {threshold})")
 
-                # Validate top candidate against threshold & candidate margin
+                # Validate top candidate against threshold & candidate margin between DIFFERENT subjects
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:
                     second_name, second_sim = scores[1]
-                    # Ensure top candidate is distinctly closer than runner-up to avoid ambiguous identity misattribution
+                    # Ensure top candidate is distinctly closer than runner-up subject
                     if (top_sim - second_sim) < 0.05:
                         margin_valid = False
                         print(f"⚠️ [Face Matcher] Ambiguous match between '{top_name}' ({top_sim:.4f}) and '{second_name}' ({second_sim:.4f}). Skipping.")
