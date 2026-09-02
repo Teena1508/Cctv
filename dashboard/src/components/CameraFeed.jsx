@@ -136,6 +136,8 @@ export default function CameraFeed({
     const timestampRef = useRef(null);
     const activeDetectionsRef = useRef([]);
     const lastAlertTimeRef = useRef(new Map());
+    const isScanningFaceRef = useRef(false);
+    const isScanningPlateRef = useRef(false);
 
     const triggerAlertThrottled = (subjectKey, alertData) => {
         const now = Date.now();
@@ -280,9 +282,10 @@ export default function CameraFeed({
                 const currentTimestamp = Date.now();
                 let newDetections = [];
 
-                // Define parallel scanner tasks
+                // Define parallel scanner tasks with in-flight guards
                 const scanPlateTask = async () => {
-                    if (!plates || plates.length === 0) return;
+                    if (!plates || plates.length === 0 || isScanningPlateRef.current) return;
+                    isScanningPlateRef.current = true;
                     const plateFormData = new FormData();
                     plateFormData.append('file', blob, 'frame.jpg');
 
@@ -334,11 +337,14 @@ export default function CameraFeed({
                         }
                     } catch (err) {
                         setAiBackendOffline(false);
+                    } finally {
+                        isScanningPlateRef.current = false;
                     }
                 };
 
                 const scanFaceTask = async () => {
-                    if (!targets || targets.length === 0) return;
+                    if (!targets || targets.length === 0 || isScanningFaceRef.current) return;
+                    isScanningFaceRef.current = true;
                     const faceFormData = new FormData();
                     faceFormData.append('file', blob, 'frame.jpg');
                     faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
@@ -441,6 +447,8 @@ export default function CameraFeed({
                                 }
                             }
                         }
+                    } finally {
+                        isScanningFaceRef.current = false;
                     }
                 };
 

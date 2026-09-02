@@ -232,8 +232,8 @@ def home():
     }
 
 @app.post("/api/scan-plate")
-async def scan_plate(file: UploadFile = File(...)):
-    contents = await file.read()
+def scan_plate(file: UploadFile = File(...)):
+    contents = file.file.read()
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -250,15 +250,11 @@ async def scan_plate(file: UploadFile = File(...)):
         crop = cand["crop"]
         bbox = cand["bbox"]
         
-        # Scale up candidate crop for OCR enhancement
-        scaled_crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        # Scale up candidate crop slightly for OCR enhancement
+        scaled_crop = cv2.resize(crop, (180, 60), interpolation=cv2.INTER_CUBIC)
         gray_crop = cv2.cvtColor(scaled_crop, cv2.COLOR_BGR2GRAY)
         
-        # CLAHE contrast enhancement
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced_crop = clahe.apply(gray_crop)
-        
-        ocr_results = reader.readtext(enhanced_crop)
+        ocr_results = reader.readtext(gray_crop)
         for (local_bbox, text, prob) in ocr_results:
             cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
             if len(cleaned) >= 2 and cleaned not in seen_texts:
@@ -270,57 +266,39 @@ async def scan_plate(file: UploadFile = File(...)):
                     "bbox": bbox
                 })
 
-    # Step 2: Fallback scan on full frame & central scanner zone if candidates yielded no plates
+    # Step 2: Single fallback scan on cropped central scanner box (320px) if no candidate crops were found
     if not detected_plates:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        results = reader.readtext(gray)
+        crop_x1, crop_y1 = int(w * 0.15), int(h * 0.15)
+        crop_x2, crop_y2 = int(w * 0.85), int(h * 0.85)
+        cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         
-        if not results:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-            results = reader.readtext(enhanced)
-            
-        if not results:
-            crop_x1, crop_y1 = int(w * 0.15), int(h * 0.15)
-            crop_x2, crop_y2 = int(w * 0.85), int(h * 0.85)
-            cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-            scaled = cv2.resize(cropped, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            cropped_gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.adaptiveThreshold(
-                cropped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-            )
-            results = reader.readtext(thresh)
+        if cropped.size > 0:
+            resized_scanner = cv2.resize(cropped, (320, 240), interpolation=cv2.INTER_AREA)
+            gray_scanner = cv2.cvtColor(resized_scanner, cv2.COLOR_BGR2GRAY)
+            results = reader.readtext(gray_scanner)
 
-        for (b, text, prob) in results:
-            cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
-            if len(cleaned) >= 2 and cleaned not in seen_texts:
-                seen_texts.add(cleaned)
-                
-                # Convert EasyOCR box points to [xmin, ymin, xmax, ymax]
-                if isinstance(b, list) and len(b) == 4:
-                    xs = [p[0] for p in b]
-                    ys = [p[1] for p in b]
-                    abs_bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
-                else:
+            for (b, text, prob) in results:
+                cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
+                if len(cleaned) >= 2 and cleaned not in seen_texts:
+                    seen_texts.add(cleaned)
                     abs_bbox = [int(w * 0.2), int(h * 0.3), int(w * 0.8), int(h * 0.7)]
-                    
-                detected_plates.append({
-                    "text": cleaned,
-                    "raw_text": text,
-                    "confidence": float(prob),
-                    "bbox": abs_bbox
-                })
+                    detected_plates.append({
+                        "text": cleaned,
+                        "raw_text": text,
+                        "confidence": float(prob),
+                        "bbox": abs_bbox
+                    })
 
     return {"results": detected_plates}
 
 @app.post("/api/scan-face")
-async def scan_face(
+def scan_face(
     file: UploadFile = File(...),
     targets: str = Form(...)
 ):
     """Processes facial recognition on incoming frames against enrolled targets."""
     try:
-        contents = await file.read()
+        contents = file.file.read()
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
