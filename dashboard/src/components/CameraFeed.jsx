@@ -1,8 +1,9 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Camera, RefreshCw, AlertCircle, Eye, AlertTriangle, ShieldCheck, MapPin } from 'lucide-react';
+import { CURRENT_NODE_LOCATION } from '../config/location';
 
 const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
-import { CURRENT_NODE_LOCATION } from '../config/location';
+const HAS_AI_BACKEND = Boolean(AI_BACKEND_BASE);
 
 function formatExactTimestamp(dateObj = new Date()) {
     const year = dateObj.getFullYear();
@@ -15,6 +16,39 @@ function formatExactTimestamp(dateObj = new Date()) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${ms}`;
 }
 
+function normalizePlateChar(char) {
+    const map = { 'O': '0', 'Q': '0', 'I': '1', 'L': '1', 'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'T': '7' };
+    return map[char] || char;
+}
+
+function isFuzzyPlateMatch(detectedStr, enrolledStr) {
+    if (!detectedStr || !enrolledStr) return false;
+    const d = detectedStr.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const e = enrolledStr.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!d || !e) return false;
+
+    // Exact or substring match
+    if (d.includes(e) || e.includes(d)) return true;
+
+    // Character normalization (0/O, 1/I, etc.)
+    const normD = d.split('').map(normalizePlateChar).join('');
+    const normE = e.split('').map(normalizePlateChar).join('');
+    if (normD.includes(normE) || normE.includes(normD)) return true;
+
+    // Levenshtein distance tolerance
+    if (Math.abs(normD.length - normE.length) <= 2 && normE.length >= 4) {
+        let diffs = 0;
+        const minLen = Math.min(normD.length, normE.length);
+        for (let i = 0; i < minLen; i++) {
+            if (normD[i] !== normE[i]) diffs++;
+        }
+        diffs += Math.abs(normD.length - normE.length);
+        if (diffs <= 2) return true;
+    }
+
+    return false;
+}
+
 const targetSignatureCache = new Map();
 
 function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16, cropBox = null) {
@@ -23,7 +57,7 @@ function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16,
         offCanvas.width = targetWidth;
         offCanvas.height = targetHeight;
         const ctx = offCanvas.getContext('2d');
-        
+
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
 
@@ -39,7 +73,7 @@ function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16,
 
         const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
         const vec = new Float32Array(targetWidth * targetHeight);
-        
+
         let sum = 0;
         for (let i = 0; i < vec.length; i++) {
             const r = imgData[i * 4];
@@ -50,7 +84,6 @@ function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16,
             sum += lum;
         }
 
-        // Zero-mean centering: Subtract average brightness to eliminate background/room lighting bias
         const mean = sum / vec.length;
         let sumSq = 0;
         for (let i = 0; i < vec.length; i++) {
@@ -101,6 +134,19 @@ export default function CameraFeed({
     const imgRef = useRef(null);
     const canvasRef = useRef(null);
     const timestampRef = useRef(null);
+    const activeDetectionsRef = useRef([]);
+    const lastAlertTimeRef = useRef(new Map());
+
+    const triggerAlertThrottled = (subjectKey, alertData) => {
+        const now = Date.now();
+        const lastTime = lastAlertTimeRef.current.get(subjectKey) || 0;
+        if (now - lastTime > 4000) {
+            lastAlertTimeRef.current.set(subjectKey, now);
+            if (onDetectionRef.current) {
+                onDetectionRef.current(alertData);
+            }
+        }
+    };
 
     const onDetectionRef = useRef(onDetection);
     const onLocationClickRef = useRef(onLocationClick);
@@ -130,10 +176,23 @@ export default function CameraFeed({
 
     useEffect(() => {
         if (lastMatch) {
-            const timer = setTimeout(() => setLastMatch(null), 4000);
+            const timer = setTimeout(() => {
+                setLastMatch(null);
+            }, 4000);
             return () => clearTimeout(timer);
         }
     }, [lastMatch]);
+
+    // Clear stale bounding box overlays after 2 seconds of no update
+    useEffect(() => {
+        const cleanupInterval = setInterval(() => {
+            if (activeDetectionsRef.current.length > 0) {
+                const now = Date.now();
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - d.timestamp) < 2500);
+            }
+        }, 1000);
+        return () => clearInterval(cleanupInterval);
+    }, []);
 
     // 1. Live Webcam Stream Setup
     useEffect(() => {
@@ -172,18 +231,14 @@ export default function CameraFeed({
         };
     }, [streamUrl]);
 
-    // Helper to extract frame blob reliably
     const captureFrameBlob = (mediaSource, width, height) => {
         return new Promise((resolve) => {
             const frameCanvas = document.createElement('canvas');
             frameCanvas.width = width;
             frameCanvas.height = height;
             const ctx = frameCanvas.getContext('2d');
-
-            // Un-mirror stream if local camera for visual consistency
             ctx.drawImage(mediaSource, 0, 0, width, height);
-
-            frameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.95);
+            frameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.90);
         });
     };
 
@@ -206,7 +261,6 @@ export default function CameraFeed({
 
             if (!srcWidth || !srcHeight) return;
 
-            // Dynamically resize overlay canvas to match active stream scale
             if (canvasRef.current && (canvasRef.current.width !== srcWidth || canvasRef.current.height !== srcHeight)) {
                 canvasRef.current.width = srcWidth;
                 canvasRef.current.height = srcHeight;
@@ -223,8 +277,12 @@ export default function CameraFeed({
                     return;
                 }
 
-                // A. SCAN LICENSE PLATES
-                if (plates && plates.length > 0) {
+                const currentTimestamp = Date.now();
+                let newDetections = [];
+
+                // Define parallel scanner tasks
+                const scanPlateTask = async () => {
+                    if (!plates || plates.length === 0) return;
                     const plateFormData = new FormData();
                     plateFormData.append('file', blob, 'frame.jpg');
 
@@ -240,47 +298,47 @@ export default function CameraFeed({
                             if (data.results && data.results.length > 0) {
                                 data.results.forEach((item) => {
                                     const rawDetected = item.text || '';
-                                    const cleanDetected = rawDetected.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-
-                                    const matched = plates.find((plate) => {
-                                        const cleanPlate = plate.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-                                        return cleanPlate && cleanDetected && (cleanDetected.includes(cleanPlate) || cleanPlate.includes(cleanDetected));
-                                    });
+                                    const matched = plates.find((plate) => isFuzzyPlateMatch(rawDetected, plate));
 
                                     if (matched) {
                                         const exactTime = formatExactTimestamp(new Date());
                                         setLastMatch(`PLATE: ${matched}`);
-                                        if (onDetectionRef.current) {
-                                            onDetectionRef.current({
-                                                id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                                eventType: 'PLATE MATCH',
-                                                subject: matched,
-                                                details: `Target plate identified on ${cameraId}: ${rawDetected}`,
-                                                lat: activeLoc.lat,
-                                                lng: activeLoc.lng,
-                                                address: activeLoc.address,
-                                                cameraId: cameraId,
-                                                cameraName: cameraName,
-                                                timestamp: exactTime,
+
+                                        if (item.bbox) {
+                                            newDetections.push({
+                                                type: 'PLATE',
+                                                label: `PLATE: ${matched}`,
+                                                bbox: item.bbox,
                                                 confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
-                                                severity: 'CRITICAL',
+                                                timestamp: currentTimestamp
                                             });
                                         }
+
+                                        triggerAlertThrottled(`PLATE_${matched}`, {
+                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                            eventType: 'PLATE MATCH',
+                                            subject: matched,
+                                            details: `Target plate identified on ${cameraId}: ${rawDetected}`,
+                                            lat: activeLoc.lat,
+                                            lng: activeLoc.lng,
+                                            address: activeLoc.address,
+                                            cameraId: cameraId,
+                                            cameraName: cameraName,
+                                            timestamp: exactTime,
+                                            confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
+                                            severity: 'CRITICAL',
+                                        });
                                     }
                                 });
                             }
-                        } else {
-                            throw new Error("Backend offline");
                         }
                     } catch (err) {
-                        // Client-side Browser AI Fallback for Live Deployed App
                         setAiBackendOffline(false);
-                        // Require backend API connection for face matching or verified canvas match
                     }
-                }
+                };
 
-                // B. SCAN FACES
-                if (targets && targets.length > 0) {
+                const scanFaceTask = async () => {
+                    if (!targets || targets.length === 0) return;
                     const faceFormData = new FormData();
                     faceFormData.append('file', blob, 'frame.jpg');
                     faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
@@ -297,34 +355,42 @@ export default function CameraFeed({
                             if (data.matches && data.matches.length > 0) {
                                 data.matches.forEach((face) => {
                                     const exactTime = formatExactTimestamp(new Date());
-                                    setLastMatch(`TARGET: ${face.name || face.label || 'UNKNOWN'}`);
-                                    if (onDetectionRef.current) {
-                                        onDetectionRef.current({
-                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                            eventType: 'TARGET MATCH',
-                                            subject: face.name || face.label,
-                                            details: `High-confidence facial match identified on ${cameraId}`,
-                                            lat: activeLoc.lat,
-                                            lng: activeLoc.lng,
-                                            address: activeLoc.address,
-                                            cameraId: cameraId,
-                                            cameraName: cameraName,
-                                            timestamp: exactTime,
+                                    const targetName = face.name || face.label || 'UNKNOWN';
+                                    setLastMatch(`TARGET: ${targetName}`);
+
+                                    if (face.bbox) {
+                                        newDetections.push({
+                                            type: 'FACE',
+                                            label: `FACE: ${targetName}`,
+                                            bbox: face.bbox,
                                             confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
-                                            severity: 'CRITICAL',
+                                            timestamp: currentTimestamp
                                         });
                                     }
+
+                                    triggerAlertThrottled(`FACE_${targetName}`, {
+                                        id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                        eventType: 'TARGET MATCH',
+                                        subject: targetName,
+                                        details: `High-precision facial match identified on ${cameraId}`,
+                                        lat: activeLoc.lat,
+                                        lng: activeLoc.lng,
+                                        address: activeLoc.address,
+                                        cameraId: cameraId,
+                                        cameraName: cameraName,
+                                        timestamp: exactTime,
+                                        confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
+                                        severity: 'CRITICAL',
+                                    });
                                 });
                             }
                         } else {
                             throw new Error("Backend offline");
                         }
                     } catch (err) {
-                        // Client-side Browser AI Engine for Vercel / Live Deployments
                         setAiBackendOffline(false);
                         const mediaSource = videoRef.current || imgRef.current;
                         if (mediaSource) {
-                            // Extract zero-centered facial region signature from central scanner zone
                             const frameSig = getCanvasImageSignature(mediaSource, 16, 16, { x: 0.25, y: 0.20, w: 0.50, h: 0.60 });
                             if (frameSig) {
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
@@ -336,27 +402,38 @@ export default function CameraFeed({
                                             for (let i = 0; i < frameSig.length; i++) {
                                                 dot += frameSig[i] * targetSig[i];
                                             }
-                                            // Strict zero-centered Pearson threshold (0.78) blocks random faces & room backgrounds
                                             if (dot >= 0.78) {
                                                 const targetName = target.name || 'WATCHLIST TARGET';
                                                 const exactTime = formatExactTimestamp(new Date());
                                                 setLastMatch(`TARGET: ${targetName}`);
-                                                if (onDetectionRef.current) {
-                                                    onDetectionRef.current({
-                                                        id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                                        eventType: 'TARGET MATCH',
-                                                        subject: targetName,
-                                                        details: `Live Browser AI matched target portrait on ${cameraId}`,
-                                                        lat: activeLoc.lat,
-                                                        lng: activeLoc.lng,
-                                                        address: activeLoc.address,
-                                                        cameraId: cameraId,
-                                                        cameraName: cameraName,
-                                                        timestamp: exactTime,
-                                                        confidence: Math.round(dot * 100),
-                                                        severity: 'CRITICAL',
-                                                    });
-                                                }
+
+                                                const bx1 = srcWidth * 0.25;
+                                                const by1 = srcHeight * 0.20;
+                                                const bx2 = srcWidth * 0.75;
+                                                const by2 = srcHeight * 0.80;
+
+                                                newDetections.push({
+                                                    type: 'FACE',
+                                                    label: `FACE: ${targetName}`,
+                                                    bbox: [bx1, by1, bx2, by2],
+                                                    confidence: Math.round(dot * 100),
+                                                    timestamp: currentTimestamp
+                                                });
+
+                                                triggerAlertThrottled(`FACE_${targetName}`, {
+                                                    id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                                    eventType: 'TARGET MATCH',
+                                                    subject: targetName,
+                                                    details: `Live Browser AI matched target portrait on ${cameraId}`,
+                                                    lat: activeLoc.lat,
+                                                    lng: activeLoc.lng,
+                                                    address: activeLoc.address,
+                                                    cameraId: cameraId,
+                                                    cameraName: cameraName,
+                                                    timestamp: exactTime,
+                                                    confidence: Math.round(dot * 100),
+                                                    severity: 'CRITICAL',
+                                                });
                                                 break;
                                             }
                                         }
@@ -365,20 +442,26 @@ export default function CameraFeed({
                             }
                         }
                     }
-                }
+                };
 
+                // Execute scanners concurrently in parallel
+                await Promise.all([scanFaceTask(), scanPlateTask()]);
+
+                if (newDetections.length > 0) {
+                    activeDetectionsRef.current = newDetections;
+                }
             } catch (e) {
                 console.warn("Frame processing exception:", e);
             } finally {
                 isProcessingFrame = false;
                 setIsScanning(false);
             }
-        }, 1000); // 1-second interval to avoid choking backend inference engines
+        }, 200);
 
         return () => clearInterval(scanInterval);
     }, [cameraId, cameraName, streamUrl]);
 
-    // 3. UI Canvas Overlay
+    // 3. High-Tech UI Canvas Overlay with Real-time Bounding Boxes
     useEffect(() => {
         let animationId;
 
@@ -402,10 +485,12 @@ export default function CameraFeed({
                     const boxW = width * 0.70;
                     const boxH = height * 0.70;
 
+                    // Central Scanner Box
                     ctx.strokeStyle = lastMatch ? '#10b981' : '#f59e0b';
                     ctx.lineWidth = 3;
                     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
+                    // Scan line
                     const scanLineY = boxY + ((Math.sin(Date.now() / 250) + 1) / 2) * boxH;
                     ctx.strokeStyle = lastMatch ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
                     ctx.lineWidth = 2;
@@ -414,6 +499,7 @@ export default function CameraFeed({
                     ctx.lineTo(boxX + boxW, scanLineY);
                     ctx.stroke();
 
+                    // Status Bar Header
                     ctx.fillStyle = lastMatch ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
                     ctx.fillRect(boxX, boxY - 30, boxW, 30);
                     ctx.fillStyle = '#ffffff';
@@ -424,6 +510,74 @@ export default function CameraFeed({
                         : (isScanning ? 'AI SCANNER ACTIVE...' : 'DETECTION ENGINE READY');
 
                     ctx.fillText(labelText, boxX + 10, boxY - 10);
+                }
+
+                // Render Bounding Boxes for Active Detections (Faces & License Plates)
+                if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
+                    activeDetectionsRef.current.forEach((det) => {
+                        if (det.bbox && det.bbox.length === 4) {
+                            const [x1, y1, x2, y2] = det.bbox;
+                            const bw = x2 - x1;
+                            const bh = y2 - y1;
+
+                            const isFace = det.type === 'FACE';
+                            const boxColor = isFace ? '#10b981' : '#3b82f6';
+                            const bgColor = isFace ? 'rgba(6, 78, 59, 0.90)' : 'rgba(30, 58, 138, 0.90)';
+
+                            // Bounding Box Rectangle with Glowing Stroke
+                            ctx.strokeStyle = boxColor;
+                            ctx.lineWidth = 3;
+                            ctx.shadowColor = boxColor;
+                            ctx.shadowBlur = 8;
+                            ctx.strokeRect(x1, y1, bw, bh);
+                            ctx.shadowBlur = 0;
+
+                            // Corner Accents
+                            const cornerLen = Math.min(15, bw * 0.2, bh * 0.2);
+                            ctx.lineWidth = 4;
+                            // Top-Left
+                            ctx.beginPath();
+                            ctx.moveTo(x1, y1 + cornerLen);
+                            ctx.lineTo(x1, y1);
+                            ctx.lineTo(x1 + cornerLen, y1);
+                            ctx.stroke();
+                            // Top-Right
+                            ctx.beginPath();
+                            ctx.moveTo(x2 - cornerLen, y1);
+                            ctx.lineTo(x2, y1);
+                            ctx.lineTo(x2, y1 + cornerLen);
+                            ctx.stroke();
+                            // Bottom-Left
+                            ctx.beginPath();
+                            ctx.moveTo(x1, y2 - cornerLen);
+                            ctx.lineTo(x1, y2);
+                            ctx.lineTo(x1 + cornerLen, y2);
+                            ctx.stroke();
+                            // Bottom-Right
+                            ctx.beginPath();
+                            ctx.moveTo(x2 - cornerLen, y2);
+                            ctx.lineTo(x2, y2);
+                            ctx.lineTo(x2, y2 - cornerLen);
+                            ctx.stroke();
+
+                            // Label Tag Badge Above Box
+                            const text = `${det.label} (${det.confidence}%)`;
+                            ctx.font = 'bold 12px monospace';
+                            const textMetrics = ctx.measureText(text);
+                            const tagW = textMetrics.width + 16;
+                            const tagH = 24;
+                            const tagY = Math.max(0, y1 - tagH);
+
+                            ctx.fillStyle = bgColor;
+                            ctx.fillRect(x1, tagY, tagW, tagH);
+                            ctx.strokeStyle = boxColor;
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(x1, tagY, tagW, tagH);
+
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillText(text, x1 + 8, tagY + 16);
+                        }
+                    });
                 }
             }
             animationId = requestAnimationFrame(renderOverlay);
@@ -460,7 +614,7 @@ export default function CameraFeed({
 
             {aiBackendOffline && (
                 <div className="absolute z-20 p-2 bg-rose-950/90 border border-rose-800 text-rose-300 text-[11px] font-mono rounded top-16 right-3">
-                    ⚠️ AI Server (Port 8002) Offline
+                    ⚠️ AI Server Offline
                 </div>
             )}
 
