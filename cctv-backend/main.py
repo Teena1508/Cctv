@@ -89,7 +89,7 @@ class SmartFaceAnalyzer:
             else:
                 gray = img
                 
-            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30))
+            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.10, minNeighbors=6, minSize=(50, 50))
             
             class HaarFace:
                 def __init__(self, bbox, embedding):
@@ -100,14 +100,15 @@ class SmartFaceAnalyzer:
             faces = []
             for (x, y, w, h) in detected:
                 face_crop = gray[y:y+h, x:x+w]
+                if face_crop.size == 0:
+                    continue
                 resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
                 sig_256 = resized.flatten().astype(np.float32) / 255.0
                 mean = np.mean(sig_256)
                 std = np.std(sig_256)
-                if std > 1e-4:
-                    sig_256 = (sig_256 - mean) / std
-                else:
-                    sig_256 = sig_256 - mean
+                if std < 0.08:  # Filter flat shadows / featureless dark patches
+                    continue
+                sig_256 = (sig_256 - mean) / std
                 sig_512 = np.concatenate([sig_256, sig_256])
                 faces.append(HaarFace(bbox=np.array([int(x), int(y), int(x+w), int(y+h)]), embedding=sig_512))
                 
@@ -365,7 +366,7 @@ def scan_face(
         
         for face in faces:
             det_score = getattr(face, 'det_score', 1.0)
-            if det_score is not None and det_score < 0.20:
+            if det_score is not None and det_score < 0.60:
                 continue
 
             embedding = face.embedding
@@ -382,7 +383,7 @@ def scan_face(
 
             if scores:
                 top_name, top_sim = scores[0]
-                threshold = 0.35 if is_fallback else 0.35
+                threshold = 0.50 if is_fallback else 0.45
                 
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:
