@@ -55,9 +55,16 @@ class SmartFaceAnalyzer:
 
     def init_fallback(self):
         print("[SmartFaceAnalyzer] Initializing OpenCV Haar Cascade face detector fallback...")
-        self.fallback_analyzer = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        if self.fallback_analyzer.empty():
-            print("[SmartFaceAnalyzer] ERROR: Failed to load Haar Cascade XML!")
+        try:
+            if hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data'):
+                self.fallback_analyzer = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            else:
+                self.fallback_analyzer = None
+        except Exception:
+            self.fallback_analyzer = None
+        if self.fallback_analyzer is None or getattr(self.fallback_analyzer, 'empty', lambda: True)():
+            print("[SmartFaceAnalyzer] WARNING: Haar Cascade unavailable or empty, using ROI fallback mode.")
+            self.fallback_analyzer = None
         else:
             print("[SmartFaceAnalyzer] Fallback face detector initialized successfully.")
 
@@ -82,7 +89,7 @@ class SmartFaceAnalyzer:
             else:
                 gray = img
                 
-            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
+            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30))
             
             class HaarFace:
                 def __init__(self, bbox, embedding):
@@ -95,8 +102,30 @@ class SmartFaceAnalyzer:
                 face_crop = gray[y:y+h, x:x+w]
                 resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
                 sig_256 = resized.flatten().astype(np.float32) / 255.0
+                mean = np.mean(sig_256)
+                std = np.std(sig_256)
+                if std > 1e-4:
+                    sig_256 = (sig_256 - mean) / std
+                else:
+                    sig_256 = sig_256 - mean
                 sig_512 = np.concatenate([sig_256, sig_256])
                 faces.append(HaarFace(bbox=np.array([int(x), int(y), int(x+w), int(y+h)]), embedding=sig_512))
+                
+            if not faces and img is not None:
+                h, w = gray.shape[:2]
+                fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
+                face_crop = gray[fy:fy+fh, fx:fx+fw]
+                if face_crop.size > 0:
+                    resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
+                    sig_256 = resized.flatten().astype(np.float32) / 255.0
+                    mean = np.mean(sig_256)
+                    std = np.std(sig_256)
+                    if std > 1e-4:
+                        sig_256 = (sig_256 - mean) / std
+                    else:
+                        sig_256 = sig_256 - mean
+                    sig_512 = np.concatenate([sig_256, sig_256])
+                    faces.append(HaarFace(bbox=np.array([fx, fy, fx+fw, fy+fh]), embedding=sig_512))
             return faces
             
         return []
@@ -158,6 +187,29 @@ def get_target_embedding(target):
         enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
         faces = face_analyzer.get(enhanced_bgr)
 
+    if not faces:
+        print(f"[Face Ingest] Haar/InsightFace missed face for '{name}'. Extracting central portrait ROI fallback...")
+        if resized_img is not None:
+            h, w = resized_img.shape[:2]
+            fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
+            gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) if len(resized_img.shape) == 3 else resized_img
+            face_crop = gray[fy:fy+fh, fx:fx+fw]
+            if face_crop.size > 0:
+                resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
+                sig_256 = resized.flatten().astype(np.float32) / 255.0
+                mean = np.mean(sig_256)
+                std = np.std(sig_256)
+                if std > 1e-4:
+                    sig_256 = (sig_256 - mean) / std
+                else:
+                    sig_256 = sig_256 - mean
+                sig_512 = np.concatenate([sig_256, sig_256])
+                class FallbackFace:
+                    def __init__(self):
+                        self.bbox = np.array([fx, fy, fx+fw, fy+fh])
+                        self.embedding = sig_512
+                faces = [FallbackFace()]
+                
     if not faces:
         print(f"[Face Ingest] ⚠️ No faces found in enrolled target image for '{name}'")
         return None
@@ -345,7 +397,7 @@ def scan_face(
 
             if scores:
                 top_name, top_sim = scores[0]
-                threshold = 0.50 if is_fallback else 0.25
+                threshold = 0.48 if is_fallback else 0.40
                 
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:

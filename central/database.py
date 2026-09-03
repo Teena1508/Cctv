@@ -26,7 +26,13 @@ class Alert(Base):
 
 def init_db():
     print("[Central DB] Initializing PostgreSQL database with PostGIS...")
-    for i in range(10):
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1;"))
+    except Exception as e:
+        print(f"[Central DB] PostgreSQL server not running locally ({e}). Operating with in-memory fallback.")
+        return False
+    for i in range(3):
         try:
             with engine.connect() as conn:
                 # Enable PostGIS extension

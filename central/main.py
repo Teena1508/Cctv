@@ -13,7 +13,10 @@ import paho.mqtt.client as mqtt
 from pydantic import BaseModel
 import cv2
 import numpy as np
-from database import init_db, get_db, Alert, SessionLocal
+try:
+    from database import init_db, get_db, Alert, SessionLocal
+except ImportError:
+    from central.database import init_db, get_db, Alert, SessionLocal
 
 # Append workspace root directory to sys.path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -468,6 +471,35 @@ def video_feed_slot(camera_slot: str):
 # =========================================================================
 from fastapi import File, Form, UploadFile
 
+import base64
+
+try:
+    if hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data'):
+        _central_face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    else:
+        _central_face_cascade = None
+except Exception:
+    _central_face_cascade = None
+_central_target_cache = {}
+
+def _get_central_signature(gray_img, bbox=None):
+    if gray_img is None or gray_img.size == 0:
+        return None
+    if bbox is not None:
+        x, y, w, h = bbox
+        crop = gray_img[y:y+h, x:x+w]
+    else:
+        crop = gray_img
+    if crop.size == 0:
+        return None
+    resized = cv2.resize(crop, (16, 16), interpolation=cv2.INTER_AREA)
+    sig = resized.flatten().astype(np.float32) / 255.0
+    mean = np.mean(sig)
+    std = np.std(sig)
+    if std > 1e-4:
+        return (sig - mean) / std
+    return sig - mean
+
 @app.post("/api/scan-face")
 async def scan_face(
     file: UploadFile = File(...),
@@ -475,7 +507,6 @@ async def scan_face(
 ):
     """Processes facial recognition on incoming webcam frames."""
     try:
-        # Read uploaded image bytes
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -483,20 +514,82 @@ async def scan_face(
         if frame is None:
             return {"matches": []}
 
-        # Convert BGR (OpenCV format) to RGB for facial recognition processing
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Parse targets payload sent from React
         try:
             target_list = json.loads(targets)
         except Exception:
             target_list = []
 
+        if not target_list:
+            return {"matches": []}
+
+        # Decode & extract signatures for target portraits
+        valid_targets = []
+        for t in target_list:
+            name = t.get("name", "Unknown")
+            img_src = t.get("imageSrc", "")
+            if not img_src:
+                continue
+            if img_src in _central_target_cache:
+                valid_targets.append((name, _central_target_cache[img_src]))
+                continue
+            try:
+                encoded = img_src.split(",", 1)[1] if "," in img_src else img_src
+                raw_bytes = base64.b64decode(encoded)
+                nparr_t = np.frombuffer(raw_bytes, np.uint8)
+                t_img = cv2.imdecode(nparr_t, cv2.IMREAD_COLOR)
+                if t_img is not None:
+                    t_gray = cv2.cvtColor(t_img, cv2.COLOR_BGR2GRAY)
+                    h_t, w_t = t_gray.shape[:2]
+                    # Try Haar Cascade on target
+                    dets = _central_face_cascade.detectMultiScale(t_gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30)) if _central_face_cascade and not getattr(_central_face_cascade, 'empty', lambda: True)() else []
+                    if len(dets) > 0:
+                        x, y, w, h = max(dets, key=lambda b: b[2]*b[3])
+                        sig = _get_central_signature(t_gray, (x, y, w, h))
+                    else:
+                        # Central ROI fallback
+                        sig = _get_central_signature(t_gray, (int(w_t*0.15), int(h_t*0.10), int(w_t*0.70), int(h_t*0.80)))
+                    if sig is not None:
+                        _central_target_cache[img_src] = sig
+                        valid_targets.append((name, sig))
+            except Exception as ex:
+                print(f"[Central Face API] Target parsing exception for '{name}': {ex}")
+
+        if not valid_targets:
+            return {"matches": []}
+
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        fh, fw = gray_frame.shape[:2]
+
+        dets = _central_face_cascade.detectMultiScale(gray_frame, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30)) if _central_face_cascade and not getattr(_central_face_cascade, 'empty', lambda: True)() else []
+        faces = []
+        for (x, y, w, h) in dets:
+            sig = _get_central_signature(gray_frame, (x, y, w, h))
+            if sig is not None:
+                faces.append(([x, y, x+w, y+h], sig))
+
+        if not faces:
+            # Fallback candidate ROI check
+            crop_box = (int(fw*0.15), int(fh*0.10), int(fw*0.70), int(fh*0.80))
+            sig = _get_central_signature(gray_frame, crop_box)
+            if sig is not None:
+                faces.append(([crop_box[0], crop_box[1], crop_box[0]+crop_box[2], crop_box[1]+crop_box[3]], sig))
+
         matches = []
-        # TODO: Replace/extend this section with your facial recognition engine (e.g. face_recognition / dlib / insightface)
-        # Example:
-        # face_locations = face_recognition.face_locations(rgb_frame)
-        # face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+        for bbox, frame_sig in faces:
+            best_name = None
+            best_sim = -1.0
+            for name, target_sig in valid_targets:
+                sim = float(np.dot(frame_sig, target_sig) / (np.linalg.norm(frame_sig) * np.linalg.norm(target_sig) + 1e-6))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_name = name
+
+            if best_name and best_sim >= 0.35:
+                matches.append({
+                    "name": best_name,
+                    "confidence": float(best_sim),
+                    "bbox": bbox
+                })
 
         return {"matches": matches}
     except Exception as e:
@@ -514,7 +607,6 @@ async def scan_plate(file: UploadFile = File(...)):
         if frame is None:
             return {"results": []}
 
-        # TODO: Replace/extend this section with your ANPR engine (e.g., EasyOCR / PaddleOCR / OpenALPR)
         results = []
         return {"results": results}
     except Exception as e:

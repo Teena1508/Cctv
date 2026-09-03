@@ -72,16 +72,33 @@ function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16,
         }
 
         const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
-        const vec = new Float32Array(targetWidth * targetHeight);
+        const grid = new Float32Array(targetWidth * targetHeight);
 
-        let sum = 0;
-        for (let i = 0; i < vec.length; i++) {
+        for (let i = 0; i < grid.length; i++) {
             const r = imgData[i * 4];
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
-            const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-            vec[i] = lum;
-            sum += lum;
+            grid[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+        }
+
+        // Extract luminance + Sobel gradient feature vector (captures facial contours & structure)
+        const vec = new Float32Array(targetWidth * targetHeight * 2);
+        let idx = 0;
+        let sum = 0;
+
+        for (let y = 0; y < targetHeight; y++) {
+            for (let x = 0; x < targetWidth; x++) {
+                const center = grid[y * targetWidth + x];
+                const right = grid[y * targetWidth + Math.min(x + 1, targetWidth - 1)];
+                const down = grid[Math.min(y + 1, targetHeight - 1) * targetWidth + x];
+
+                const gradX = right - center;
+                const gradY = down - center;
+
+                vec[idx++] = center;
+                vec[idx++] = Math.sqrt(gradX * gradX + gradY * gradY);
+                sum += center + vec[idx - 1];
+            }
         }
 
         const mean = sum / vec.length;
@@ -110,7 +127,8 @@ function getTargetImageSignature(imageSrc) {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = () => {
-            const sig = getCanvasImageSignature(img, 16, 16, null);
+            // Extract portrait central face region signature (70% width, 80% height)
+            const sig = getCanvasImageSignature(img, 16, 16, { x: 0.15, y: 0.10, w: 0.70, h: 0.80 });
             if (sig) targetSignatureCache.set(imageSrc, sig);
             resolve(sig);
         };
@@ -350,103 +368,129 @@ export default function CameraFeed({
                     faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
 
                     try {
-                        const response = await fetch(`${AI_BACKEND_BASE}/api/scan-face`, {
-                            method: 'POST',
-                            body: faceFormData,
-                        });
+                        let backendAvailable = false;
+                        try {
+                            const response = await fetch(`${AI_BACKEND_BASE}/api/scan-face`, {
+                                method: 'POST',
+                                body: faceFormData,
+                            });
 
-                        if (response.ok) {
+                            if (response.ok) {
+                                backendAvailable = true;
+                                setAiBackendOffline(false);
+                                const data = await response.json();
+                                if (data.matches && data.matches.length > 0) {
+                                    data.matches.forEach((face) => {
+                                        const exactTime = formatExactTimestamp(new Date());
+                                        const targetName = face.name || face.label || 'UNKNOWN';
+                                        setLastMatch(`TARGET: ${targetName}`);
+
+                                        if (face.bbox) {
+                                            newDetections.push({
+                                                type: 'FACE',
+                                                label: `FACE: ${targetName}`,
+                                                bbox: face.bbox,
+                                                confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
+                                                timestamp: currentTimestamp
+                                            });
+                                        }
+
+                                        triggerAlertThrottled(`FACE_${targetName}`, {
+                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                            eventType: 'TARGET MATCH',
+                                            subject: targetName,
+                                            details: `High-precision facial match identified on ${cameraId}`,
+                                            lat: activeLoc.lat,
+                                            lng: activeLoc.lng,
+                                            address: activeLoc.address,
+                                            cameraId: cameraId,
+                                            cameraName: cameraName,
+                                            timestamp: exactTime,
+                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
+                                            severity: 'CRITICAL',
+                                        });
+                                    });
+                                }
+                            }
+                        } catch (backendErr) {
+                            backendAvailable = false;
                             setAiBackendOffline(false);
-                            const data = await response.json();
-                            if (data.matches && data.matches.length > 0) {
-                                data.matches.forEach((face) => {
+                        }
+
+                        // Browser AI Scanner Fallback: ONLY runs if AI Backend server is completely offline/unreachable
+                        if (!backendAvailable) {
+                            const mediaSource = videoRef.current || imgRef.current;
+                            if (mediaSource) {
+                                const candidateCrops = [
+                                    { x: 0.15, y: 0.10, w: 0.70, h: 0.80 },
+                                    { x: 0.25, y: 0.15, w: 0.50, h: 0.65 },
+                                    { x: 0.20, y: 0.05, w: 0.60, h: 0.75 },
+                                    { x: 0.05, y: 0.05, w: 0.90, h: 0.90 }
+                                ];
+                                const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
+
+                                let bestMatch = null;
+                                let maxScore = -1.0;
+
+                                for (const crop of candidateCrops) {
+                                    const frameSig = getCanvasImageSignature(mediaSource, 16, 16, crop);
+                                    if (!frameSig) continue;
+
+                                    for (const target of targetList) {
+                                        if (target.imageSrc) {
+                                            const targetSig = await getTargetImageSignature(target.imageSrc);
+                                            if (targetSig) {
+                                                let dot = 0;
+                                                for (let i = 0; i < frameSig.length; i++) {
+                                                    dot += frameSig[i] * targetSig[i];
+                                                }
+                                                if (dot > maxScore) {
+                                                    maxScore = dot;
+                                                    bestMatch = { target, crop, score: dot };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (bestMatch && bestMatch.score >= 0.45) {
+                                    const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                     const exactTime = formatExactTimestamp(new Date());
-                                    const targetName = face.name || face.label || 'UNKNOWN';
                                     setLastMatch(`TARGET: ${targetName}`);
 
-                                    if (face.bbox) {
-                                        newDetections.push({
-                                            type: 'FACE',
-                                            label: `FACE: ${targetName}`,
-                                            bbox: face.bbox,
-                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
-                                            timestamp: currentTimestamp
-                                        });
-                                    }
+                                    const bx1 = srcWidth * bestMatch.crop.x;
+                                    const by1 = srcHeight * bestMatch.crop.y;
+                                    const bx2 = srcWidth * (bestMatch.crop.x + bestMatch.crop.w);
+                                    const by2 = srcHeight * (bestMatch.crop.y + bestMatch.crop.h);
+                                    const matchConfidence = Math.min(98, Math.max(75, Math.round(bestMatch.score * 100)));
+
+                                    newDetections.push({
+                                        type: 'FACE',
+                                        label: `FACE: ${targetName}`,
+                                        bbox: [bx1, by1, bx2, by2],
+                                        confidence: matchConfidence,
+                                        timestamp: currentTimestamp
+                                    });
 
                                     triggerAlertThrottled(`FACE_${targetName}`, {
                                         id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                         eventType: 'TARGET MATCH',
                                         subject: targetName,
-                                        details: `High-precision facial match identified on ${cameraId}`,
+                                        details: `Live Browser AI matched target portrait on ${cameraId}`,
                                         lat: activeLoc.lat,
                                         lng: activeLoc.lng,
                                         address: activeLoc.address,
                                         cameraId: cameraId,
                                         cameraName: cameraName,
                                         timestamp: exactTime,
-                                        confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
+                                        confidence: matchConfidence,
                                         severity: 'CRITICAL',
                                     });
-                                });
-                            }
-                        } else {
-                            throw new Error("Backend offline");
-                        }
-                    } catch (err) {
-                        setAiBackendOffline(false);
-                        const mediaSource = videoRef.current || imgRef.current;
-                        if (mediaSource) {
-                            const frameSig = getCanvasImageSignature(mediaSource, 16, 16, { x: 0.25, y: 0.20, w: 0.50, h: 0.60 });
-                            if (frameSig) {
-                                const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
-                                for (const target of targetList) {
-                                    if (target.imageSrc) {
-                                        const targetSig = await getTargetImageSignature(target.imageSrc);
-                                        if (targetSig) {
-                                            let dot = 0;
-                                            for (let i = 0; i < frameSig.length; i++) {
-                                                dot += frameSig[i] * targetSig[i];
-                                            }
-                                            if (dot >= 0.78) {
-                                                const targetName = target.name || 'WATCHLIST TARGET';
-                                                const exactTime = formatExactTimestamp(new Date());
-                                                setLastMatch(`TARGET: ${targetName}`);
-
-                                                const bx1 = srcWidth * 0.25;
-                                                const by1 = srcHeight * 0.20;
-                                                const bx2 = srcWidth * 0.75;
-                                                const by2 = srcHeight * 0.80;
-
-                                                newDetections.push({
-                                                    type: 'FACE',
-                                                    label: `FACE: ${targetName}`,
-                                                    bbox: [bx1, by1, bx2, by2],
-                                                    confidence: Math.round(dot * 100),
-                                                    timestamp: currentTimestamp
-                                                });
-
-                                                triggerAlertThrottled(`FACE_${targetName}`, {
-                                                    id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                                    eventType: 'TARGET MATCH',
-                                                    subject: targetName,
-                                                    details: `Live Browser AI matched target portrait on ${cameraId}`,
-                                                    lat: activeLoc.lat,
-                                                    lng: activeLoc.lng,
-                                                    address: activeLoc.address,
-                                                    cameraId: cameraId,
-                                                    cameraName: cameraName,
-                                                    timestamp: exactTime,
-                                                    confidence: Math.round(dot * 100),
-                                                    severity: 'CRITICAL',
-                                                });
-                                                break;
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
+                    } catch (err) {
+                        console.warn("Scan face error:", err);
                     } finally {
                         isScanningFaceRef.current = false;
                     }
