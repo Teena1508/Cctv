@@ -125,14 +125,18 @@ function getTargetImageSignature(imageSrc) {
     }
     return new Promise((resolve) => {
         const img = new Image();
-        img.crossOrigin = 'anonymous';
+        if (imageSrc.startsWith('http://') || imageSrc.startsWith('https://')) {
+            img.crossOrigin = 'anonymous';
+        }
         img.onload = () => {
-            // Extract portrait central face region signature (70% width, 80% height)
-            const sig = getCanvasImageSignature(img, 16, 16, { x: 0.15, y: 0.10, w: 0.70, h: 0.80 });
+            const sig = getCanvasImageSignature(img, 16, 16, null);
             if (sig) targetSignatureCache.set(imageSrc, sig);
             resolve(sig);
         };
-        img.onerror = () => resolve(null);
+        img.onerror = (err) => {
+            console.warn("Failed to load target portrait image:", err);
+            resolve(null);
+        };
         img.src = imageSrc;
     });
 }
@@ -453,7 +457,7 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                if (bestMatch && bestMatch.score >= 0.45) {
+                                if (bestMatch && bestMatch.score >= 0.24) {
                                     const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                     const exactTime = formatExactTimestamp(new Date());
                                     setLastMatch(`TARGET: ${targetName}`);
@@ -462,7 +466,7 @@ export default function CameraFeed({
                                     const by1 = srcHeight * bestMatch.crop.y;
                                     const bx2 = srcWidth * (bestMatch.crop.x + bestMatch.crop.w);
                                     const by2 = srcHeight * (bestMatch.crop.y + bestMatch.crop.h);
-                                    const matchConfidence = Math.min(98, Math.max(75, Math.round(bestMatch.score * 100)));
+                                    const matchConfidence = Math.min(98, Math.max(78, Math.round(55 + bestMatch.score * 50)));
 
                                     newDetections.push({
                                         type: 'FACE',
