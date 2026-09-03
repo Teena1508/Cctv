@@ -122,7 +122,7 @@ class FRSEngine:
                 def __init__(self):
                     pass
                 def get(self, img):
-                    return [MockFace()]
+                    return []
             
             self.face_analyzer = MockFaceAnalysis()
 

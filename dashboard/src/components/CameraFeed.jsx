@@ -49,7 +49,7 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
     return false;
 }
 
-function getCropSkinRatio(imgSource, cropBox) {
+function verifyFaceInCrop(imgSource, cropBox) {
     try {
         const offCanvas = document.createElement('canvas');
         const sampleW = 32;
@@ -61,7 +61,7 @@ function getCropSkinRatio(imgSource, cropBox) {
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
 
-        if (!srcW || !srcH) return 0;
+        if (!srcW || !srcH) return false;
 
         const sx = srcW * cropBox.x;
         const sy = srcH * cropBox.y;
@@ -73,11 +73,13 @@ function getCropSkinRatio(imgSource, cropBox) {
 
         let skinPixels = 0;
         const totalPixels = sampleW * sampleH;
+        const gridLuma = new Float32Array(totalPixels);
 
         for (let i = 0; i < totalPixels; i++) {
             const r = imgData[i * 4];
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
+            gridLuma[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
 
             const isSkin = (r > 45 && g > 30 && b > 20 &&
                 (Math.max(r, g, b) - Math.min(r, g, b) > 15) &&
@@ -90,9 +92,34 @@ function getCropSkinRatio(imgSource, cropBox) {
             if (isSkin) skinPixels++;
         }
 
-        return skinPixels / totalPixels;
+        const skinRatio = skinPixels / totalPixels;
+        if (skinRatio < 0.20) return false;
+
+        // Facial Structure Contrast check (Eyes vs Cheeks)
+        let upperLuma = 0, upperCount = 0;
+        let lowerLuma = 0, lowerCount = 0;
+
+        for (let y = 6; y <= 14; y++) {
+            for (let x = 8; x <= 24; x++) {
+                upperLuma += gridLuma[y * sampleW + x];
+                upperCount++;
+            }
+        }
+        for (let y = 15; y <= 24; y++) {
+            for (let x = 8; x <= 24; x++) {
+                lowerLuma += gridLuma[y * sampleW + x];
+                lowerCount++;
+            }
+        }
+
+        const avgUpper = upperCount > 0 ? upperLuma / upperCount : 0;
+        const avgLower = lowerCount > 0 ? lowerLuma / lowerCount : 0;
+
+        if ((avgLower - avgUpper) < 0.015) return false;
+
+        return true;
     } catch (e) {
-        return 0;
+        return false;
     }
 }
 
@@ -485,8 +512,7 @@ export default function CameraFeed({
 
                                 for (const crop of candidateCrops) {
                                     // Face Presence Verification: reject empty room / wall / desk backgrounds
-                                    const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.12) continue;
+                                    if (!verifyFaceInCrop(mediaSource, crop)) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 16, 16, crop);
                                     if (!frameSig) continue;
@@ -554,9 +580,7 @@ export default function CameraFeed({
                 // Execute scanners concurrently in parallel
                 await Promise.all([scanFaceTask(), scanPlateTask()]);
 
-                if (newDetections.length > 0) {
-                    activeDetectionsRef.current = newDetections;
-                }
+                activeDetectionsRef.current = newDetections;
             } catch (e) {
                 console.warn("Frame processing exception:", e);
             } finally {

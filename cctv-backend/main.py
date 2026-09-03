@@ -111,21 +111,6 @@ class SmartFaceAnalyzer:
                 sig_512 = np.concatenate([sig_256, sig_256])
                 faces.append(HaarFace(bbox=np.array([int(x), int(y), int(x+w), int(y+h)]), embedding=sig_512))
                 
-            if not faces and img is not None:
-                h, w = gray.shape[:2]
-                fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
-                face_crop = gray[fy:fy+fh, fx:fx+fw]
-                if face_crop.size > 0:
-                    resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
-                    sig_256 = resized.flatten().astype(np.float32) / 255.0
-                    mean = np.mean(sig_256)
-                    std = np.std(sig_256)
-                    if std > 1e-4:
-                        sig_256 = (sig_256 - mean) / std
-                    else:
-                        sig_256 = sig_256 - mean
-                    sig_512 = np.concatenate([sig_256, sig_256])
-                    faces.append(HaarFace(bbox=np.array([fx, fy, fx+fw, fy+fh]), embedding=sig_512))
             return faces
             
         return []
@@ -397,7 +382,7 @@ def scan_face(
 
             if scores:
                 top_name, top_sim = scores[0]
-                threshold = 0.48 if is_fallback else 0.40
+                threshold = 0.35 if is_fallback else 0.35
                 
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:

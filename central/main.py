@@ -567,13 +567,6 @@ async def scan_face(
             if sig is not None:
                 faces.append(([x, y, x+w, y+h], sig))
 
-        if not faces:
-            # Fallback candidate ROI check
-            crop_box = (int(fw*0.15), int(fh*0.10), int(fw*0.70), int(fh*0.80))
-            sig = _get_central_signature(gray_frame, crop_box)
-            if sig is not None:
-                faces.append(([crop_box[0], crop_box[1], crop_box[0]+crop_box[2], crop_box[1]+crop_box[3]], sig))
-
         matches = []
         for bbox, frame_sig in faces:
             best_name = None
