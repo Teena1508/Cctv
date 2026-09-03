@@ -577,7 +577,7 @@ async def scan_face(
                     best_sim = sim
                     best_name = name
 
-            if best_name and best_sim >= 0.35:
+            if best_name and best_sim >= 0.38:
                 matches.append({
                     "name": best_name,
                     "confidence": float(best_sim),

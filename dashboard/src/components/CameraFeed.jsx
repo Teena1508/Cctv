@@ -49,7 +49,7 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
     return false;
 }
 
-function verifyFaceInCrop(imgSource, cropBox) {
+function getCropSkinRatio(imgSource, cropBox) {
     try {
         const offCanvas = document.createElement('canvas');
         const sampleW = 32;
@@ -61,7 +61,7 @@ function verifyFaceInCrop(imgSource, cropBox) {
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
 
-        if (!srcW || !srcH) return false;
+        if (!srcW || !srcH) return 0;
 
         const sx = srcW * cropBox.x;
         const sy = srcH * cropBox.y;
@@ -73,13 +73,11 @@ function verifyFaceInCrop(imgSource, cropBox) {
 
         let skinPixels = 0;
         const totalPixels = sampleW * sampleH;
-        const gridLuma = new Float32Array(totalPixels);
 
         for (let i = 0; i < totalPixels; i++) {
             const r = imgData[i * 4];
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
-            gridLuma[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
 
             const isSkin = (r > 45 && g > 30 && b > 20 &&
                 (Math.max(r, g, b) - Math.min(r, g, b) > 15) &&
@@ -92,34 +90,9 @@ function verifyFaceInCrop(imgSource, cropBox) {
             if (isSkin) skinPixels++;
         }
 
-        const skinRatio = skinPixels / totalPixels;
-        if (skinRatio < 0.20) return false;
-
-        // Facial Structure Contrast check (Eyes vs Cheeks)
-        let upperLuma = 0, upperCount = 0;
-        let lowerLuma = 0, lowerCount = 0;
-
-        for (let y = 6; y <= 14; y++) {
-            for (let x = 8; x <= 24; x++) {
-                upperLuma += gridLuma[y * sampleW + x];
-                upperCount++;
-            }
-        }
-        for (let y = 15; y <= 24; y++) {
-            for (let x = 8; x <= 24; x++) {
-                lowerLuma += gridLuma[y * sampleW + x];
-                lowerCount++;
-            }
-        }
-
-        const avgUpper = upperCount > 0 ? upperLuma / upperCount : 0;
-        const avgLower = lowerCount > 0 ? lowerLuma / lowerCount : 0;
-
-        if ((avgLower - avgUpper) < 0.015) return false;
-
-        return true;
+        return skinPixels / totalPixels;
     } catch (e) {
-        return false;
+        return 0;
     }
 }
 
@@ -234,6 +207,9 @@ export default function CameraFeed({
     const lastAlertTimeRef = useRef(new Map());
     const isScanningFaceRef = useRef(false);
     const isScanningPlateRef = useRef(false);
+    const frameCounterRef = useRef(0);
+    const lastProcessedFaceFrameRef = useRef(0);
+    const lastProcessedPlateFrameRef = useRef(0);
 
     const triggerAlertThrottled = (subjectKey, alertData) => {
         const now = Date.now();
@@ -375,7 +351,9 @@ export default function CameraFeed({
                     return;
                 }
 
-                const currentTimestamp = Date.now();
+                frameCounterRef.current += 1;
+                const currentFrameId = frameCounterRef.current;
+                const currentTimestamp = Date.now() / 1000.0;
                 let newDetections = [];
 
                 // Define parallel scanner tasks with in-flight guards
@@ -384,6 +362,8 @@ export default function CameraFeed({
                     isScanningPlateRef.current = true;
                     const plateFormData = new FormData();
                     plateFormData.append('file', blob, 'frame.jpg');
+                    plateFormData.append('frame_id', currentFrameId.toString());
+                    plateFormData.append('timestamp', currentTimestamp.toString());
 
                     try {
                         const response = await fetch(`${AI_BACKEND_BASE}/api/scan-plate`, {
@@ -394,8 +374,14 @@ export default function CameraFeed({
                         if (response.ok) {
                             setAiBackendOffline(false);
                             const data = await response.json();
+                            if (data.frame_id && data.frame_id < lastProcessedPlateFrameRef.current) {
+                                return; // Discard out-of-order stale response
+                            }
+                            if (data.frame_id) lastProcessedPlateFrameRef.current = data.frame_id;
+
                             if (data.results && data.results.length > 0) {
                                 data.results.forEach((item) => {
+                                    if (!item) return;
                                     const rawDetected = item.text || '';
                                     const matched = plates.find((plate) => isFuzzyPlateMatch(rawDetected, plate));
 
@@ -444,6 +430,8 @@ export default function CameraFeed({
                     const faceFormData = new FormData();
                     faceFormData.append('file', blob, 'frame.jpg');
                     faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
+                    faceFormData.append('frame_id', currentFrameId.toString());
+                    faceFormData.append('timestamp', currentTimestamp.toString());
 
                     try {
                         let backendAvailable = false;
@@ -457,6 +445,11 @@ export default function CameraFeed({
                                 backendAvailable = true;
                                 setAiBackendOffline(false);
                                 const data = await response.json();
+                                if (data.frame_id && data.frame_id < lastProcessedFaceFrameRef.current) {
+                                    return; // Discard out-of-order stale response
+                                }
+                                if (data.frame_id) lastProcessedFaceFrameRef.current = data.frame_id;
+
                                 if (data.matches && data.matches.length > 0) {
                                     data.matches.forEach((face) => {
                                         const exactTime = formatExactTimestamp(new Date());
@@ -512,7 +505,8 @@ export default function CameraFeed({
 
                                 for (const crop of candidateCrops) {
                                     // Face Presence Verification: reject empty room / wall / desk backgrounds
-                                    if (!verifyFaceInCrop(mediaSource, crop)) continue;
+                                    const skinRatio = getCropSkinRatio(mediaSource, crop);
+                                    if (skinRatio < 0.18) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 16, 16, crop);
                                     if (!frameSig) continue;
@@ -534,7 +528,7 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                if (bestMatch && bestMatch.score >= 0.38) {
+                                if (bestMatch && bestMatch.score >= 0.65) {
                                     const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                     const exactTime = formatExactTimestamp(new Date());
                                     setLastMatch(`TARGET: ${targetName}`);

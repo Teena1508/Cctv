@@ -2,15 +2,19 @@ import os
 import json
 import base64
 import re
-from fastapi import FastAPI, File, UploadFile, Form
+import time
+import collections
+import threading
+from fastapi import FastAPI, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import cv2
 import numpy as np
 import easyocr
 import insightface
 from insightface.app import FaceAnalysis
 
-app = FastAPI()
+app = FastAPI(title="CCTV AI Detection & ANPR Backend", version="2.0.0")
 
 # Enable CORS for React dashboard
 app.add_middleware(
@@ -21,12 +25,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Initialize EasyOCR Reader (loads models once on startup)
+# =========================================================================
+# CONFIGURABLE DETECTION & TRACKING THRESHOLDS
+# =========================================================================
+DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
+SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "true").lower() == "true"
+
+# Person / Face Detection & Temporal Confirmation Thresholds
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.30"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.28"))
+PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "3"))      # Require N out of M frames to confirm presence
+PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
+PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
+
+# License Plate ANPR Thresholds
+PLATE_MIN_CONF = float(os.getenv("PLATE_MIN_CONF", "0.35"))
+PLATE_MIN_CONSENSUS = int(os.getenv("PLATE_MIN_CONSENSUS", "2")) # Min matching reads across window
+PLATE_WINDOW_M = int(os.getenv("PLATE_WINDOW_M", "6"))         # Sliding window size for OCR consensus
+
+# 1. Initialize EasyOCR Reader
 print("[ANPR Engine] Loading EasyOCR Engine...")
 reader = easyocr.Reader(['en'], gpu=False)
 print("[ANPR Engine] EasyOCR Engine Ready for Digits & Plates!")
 
-# 2. Smart Face Analyzer with Robust InsightFace & Haar Fallback
+# 2. Smart Face Analyzer with InsightFace & Haar Fallback
 class SmartFaceAnalyzer:
     def __init__(self):
         self.real_analyzer = None
@@ -63,7 +85,7 @@ class SmartFaceAnalyzer:
         except Exception:
             self.fallback_analyzer = None
         if self.fallback_analyzer is None or getattr(self.fallback_analyzer, 'empty', lambda: True)():
-            print("[SmartFaceAnalyzer] WARNING: Haar Cascade unavailable or empty, using ROI fallback mode.")
+            print("[SmartFaceAnalyzer] WARNING: Haar Cascade unavailable or empty.")
             self.fallback_analyzer = None
         else:
             print("[SmartFaceAnalyzer] Fallback face detector initialized successfully.")
@@ -72,7 +94,6 @@ class SmartFaceAnalyzer:
         if img is None:
             return []
             
-        # Try real InsightFace analyzer first
         if self.real_analyzer is not None:
             try:
                 return self.real_analyzer.get(img)
@@ -82,14 +103,9 @@ class SmartFaceAnalyzer:
                 if self.fallback_analyzer is None:
                     self.init_fallback()
 
-        # Fallback Haar Cascade detector
         if self.fallback_analyzer is not None:
-            if len(img.shape) == 3 and img.shape[2] == 3:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = img
-                
-            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.10, minNeighbors=6, minSize=(50, 50))
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 and img.shape[2] == 3 else img
+            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30))
             
             class HaarFace:
                 def __init__(self, bbox, embedding):
@@ -100,15 +116,14 @@ class SmartFaceAnalyzer:
             faces = []
             for (x, y, w, h) in detected:
                 face_crop = gray[y:y+h, x:x+w]
-                if face_crop.size == 0:
-                    continue
                 resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
                 sig_256 = resized.flatten().astype(np.float32) / 255.0
                 mean = np.mean(sig_256)
                 std = np.std(sig_256)
-                if std < 0.08:  # Filter flat shadows / featureless dark patches
-                    continue
-                sig_256 = (sig_256 - mean) / std
+                if std > 1e-4:
+                    sig_256 = (sig_256 - mean) / std
+                else:
+                    sig_256 = sig_256 - mean
                 sig_512 = np.concatenate([sig_256, sig_256])
                 faces.append(HaarFace(bbox=np.array([int(x), int(y), int(x+w), int(y+h)]), embedding=sig_512))
                 
@@ -116,13 +131,10 @@ class SmartFaceAnalyzer:
             
         return []
 
-# Initialize smart analyzer
 face_analyzer = SmartFaceAnalyzer()
-
-# Embeddings Cache for enrolled target portraits to optimize runtime performance
 target_cache = {}
 
-def resize_for_face_detection(img, max_size=640):
+def resize_for_face_detection(img, max_size=480):
     if img is None:
         return None, 1.0
     h, w = img.shape[:2]
@@ -141,8 +153,7 @@ def decode_base64_image(image_src):
             encoded = image_src
         img_data = base64.b64decode(encoded)
         nparr = np.frombuffer(img_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        return img
+        return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     except Exception as e:
         print(f"Error decoding base64 image: {e}")
         return None
@@ -163,11 +174,6 @@ def get_target_embedding(target):
     resized_img, _ = resize_for_face_detection(img)
     faces = face_analyzer.get(resized_img)
 
-    # Strategy 2: Try original unscaled image if resized failed
-    if not faces and img is not None:
-        faces = face_analyzer.get(img)
-
-    # Strategy 3: Try contrast-enhanced image if dim
     if not faces and resized_img is not None and len(resized_img.shape) == 3:
         lab = cv2.cvtColor(resized_img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -177,16 +183,7 @@ def get_target_embedding(target):
         enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
         faces = face_analyzer.get(enhanced_bgr)
 
-    # Strategy 4: Central portrait crop for tight face detection
-    if not faces and img is not None:
-        h, w = img.shape[:2]
-        crop_face = img[int(h*0.05):int(h*0.95), int(w*0.05):int(w*0.95)]
-        if crop_face.size > 0:
-            faces = face_analyzer.get(crop_face)
-
-    # Strategy 5: If Haar Cascade fallback mode is active, use Haar signature
-    if not faces and face_analyzer.real_analyzer is None and resized_img is not None:
-        print(f"[Face Ingest] Haar Cascade fallback active for '{name}'. Extracting central portrait ROI signature...")
+    if not faces and resized_img is not None:
         h, w = resized_img.shape[:2]
         fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
         gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) if len(resized_img.shape) == 3 else resized_img
@@ -208,10 +205,8 @@ def get_target_embedding(target):
             faces = [FallbackFace()]
                 
     if not faces:
-        print(f"[Face Ingest] ⚠️ No faces found in enrolled target image for '{name}'")
         return None
         
-    # Select largest face
     largest_face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
     embedding = largest_face.embedding
     norm = np.linalg.norm(embedding)
@@ -222,27 +217,151 @@ def get_target_embedding(target):
     print(f"[Face Ingest] ✅ Cached embedding for target: '{name}' (Vector Dim: {len(embedding)})")
     return embedding
 
+# =========================================================================
+# TEMPORAL OBJECT TRACKER & STATE MACHINE (Person & Face)
+# =========================================================================
+class TemporalTracker:
+    def __init__(self):
+        self.tracks = {}  # track_id -> dict
+        self.next_track_id = 1
+        self.plate_history = collections.deque(maxlen=PLATE_WINDOW_M)
+        self.lock = threading.Lock()
+
+    def calculate_iou(self, boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[0])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[0])
+        iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+        return iou
+
+    def update_face_tracks(self, frame_id, detected_matches):
+        """
+        Updates sliding-window history for detected face matches.
+        Enforces:
+          - N out of M confirmation to mark CONFIRMED_PRESENT
+          - K consecutive absent frames to mark CONFIRMED_ABSENT
+        """
+        with self.lock:
+            updated_track_ids = set()
+            confirmed_matches = []
+
+            for det in detected_matches:
+                bbox = det["bbox"]
+                name = det["name"]
+                conf = det["confidence"]
+
+                # Match with existing active tracks using IoU & subject name
+                best_track_id = None
+                best_iou = 0.0
+
+                for t_id, track in self.tracks.items():
+                    if track["name"] == name:
+                        iou = self.calculate_iou(bbox, track["last_bbox"])
+                        if iou > 0.20 and iou > best_iou:
+                            best_iou = iou
+                            best_track_id = t_id
+
+                if best_track_id is None:
+                    # Create new track
+                    best_track_id = f"TRACK-{self.next_track_id:03d}"
+                    self.next_track_id += 1
+                    self.tracks[best_track_id] = {
+                        "track_id": best_track_id,
+                        "name": name,
+                        "last_bbox": bbox,
+                        "window": collections.deque(maxlen=PERSON_WINDOW_M),
+                        "absent_count": 0,
+                        "status": "TENTATIVE"
+                    }
+
+                track = self.tracks[best_track_id]
+                track["last_bbox"] = bbox
+                track["window"].append(True)
+                track["absent_count"] = 0
+                updated_track_ids.add(best_track_id)
+
+                # Evaluate presence (return match immediately on frame 1 while tracking state)
+                hits = sum(track["window"])
+                track["status"] = "CONFIRMED_PRESENT" if hits >= PERSON_CONFIRM_N else "DETECTED"
+                confirmed_matches.append({
+                    "name": name,
+                    "confidence": conf,
+                    "bbox": bbox,
+                    "track_id": best_track_id,
+                    "status": track["status"]
+                })
+
+            # Update absent tracks
+            for t_id, track in list(self.tracks.items()):
+                if t_id not in updated_track_ids:
+                    track["window"].append(False)
+                    track["absent_count"] += 1
+                    if track["absent_count"] >= PERSON_ABSENT_K:
+                        track["status"] = "CONFIRMED_ABSENT"
+                        del self.tracks[t_id]
+
+            return confirmed_matches
+
+    def add_plate_observation(self, raw_text, norm_text, conf, bbox, timestamp):
+        with self.lock:
+            self.plate_history.append({
+                "raw": raw_text,
+                "norm": norm_text,
+                "conf": conf,
+                "bbox": bbox,
+                "timestamp": timestamp
+            })
+
+    def get_plate_consensus(self):
+        with self.lock:
+            if not self.plate_history:
+                return None
+
+            counts = collections.defaultdict(int)
+            total_conf = collections.defaultdict(float)
+            latest_bbox = {}
+            raw_map = {}
+
+            for item in self.plate_history:
+                norm = item["norm"]
+                counts[norm] += 1
+                total_conf[norm] += item["conf"]
+                latest_bbox[norm] = item["bbox"]
+                raw_map[norm] = item["raw"]
+
+            best_norm = max(counts, key=lambda k: (counts[k], total_conf[k]))
+            freq = counts[best_norm]
+            avg_conf = total_conf[best_norm] / freq
+
+            if avg_conf >= PLATE_MIN_CONF:
+                return {
+                    "text": best_norm,
+                    "raw_text": raw_map[best_norm],
+                    "confidence": round(avg_conf, 3),
+                    "bbox": latest_bbox[best_norm],
+                    "consensus_count": freq
+                }
+            return None
+
+tracker = TemporalTracker()
+
+# =========================================================================
+# LICENSE PLATE ANPR PIPELINE & PREPROCESSING
+# =========================================================================
 def locate_license_plate_candidates(frame):
-    """
-    Extracts candidate license plate regions using Sobel vertical edge detection,
-    morphological closing, and rectangular aspect ratio filtering.
-    """
     if frame is None:
         return []
         
     h, w = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Smooth image to preserve edges while removing high frequency noise
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
     blur = cv2.bilateralFilter(gray, 9, 75, 75)
-    
-    # Sobel X derivative to accentuate vertical text edges
     sobel_x = cv2.Sobel(blur, cv2.CV_8U, 1, 0, ksize=3)
-    
-    # Otsu thresholding
     _, thresh = cv2.threshold(sobel_x, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Morphological closing to group characters into plate shapes
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 5))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     
@@ -251,12 +370,11 @@ def locate_license_plate_candidates(frame):
     candidates = []
     for cnt in contours:
         x, y, cw, ch = cv2.boundingRect(cnt)
-        if cw < 30 or ch < 10 or cw > w * 0.95 or ch > h * 0.95:
+        if cw < 40 or ch < 12 or cw > w * 0.95 or ch > h * 0.95:
             continue
         aspect_ratio = float(cw) / float(ch)
         area = cw * ch
-        # Typical license plate aspect ratio is between 1.8 and 6.5
-        if 1.8 <= aspect_ratio <= 6.5 and 400 <= area <= (w * h * 0.5):
+        if 1.8 <= aspect_ratio <= 6.5 and 450 <= area <= (w * h * 0.5):
             pad_x = int(cw * 0.08)
             pad_y = int(ch * 0.15)
             x1 = max(0, x - pad_x)
@@ -271,88 +389,111 @@ def locate_license_plate_candidates(frame):
                 })
     return candidates
 
+def preprocess_plate_crop(crop):
+    """Enhances plate crop before feeding to EasyOCR."""
+    if crop is None or crop.size == 0:
+        return None
+    h, w = crop.shape[:2]
+    if h < 10 or w < 25:
+        return None
+
+    target_h = 60
+    scale = target_h / float(h)
+    target_w = max(120, int(w * scale))
+
+    resized = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
+
+    # Contrast adjustment (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    denoised = cv2.bilateralFilter(enhanced, 7, 50, 50)
+    return denoised
+
+def normalize_indian_plate(text):
+    """Positional character normalization for Indian plate formats (e.g. DL 01 AB 1234)."""
+    cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
+    if len(cleaned) < 4:
+        return cleaned
+
+    num_to_char = {'0': 'O', '1': 'I', '8': 'B', '5': 'S', '2': 'Z', '6': 'G', '4': 'A'}
+    char_to_num = {'O': '0', 'Q': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6', 'A': '4', 'T': '7'}
+
+    pattern = re.compile(r'^([A-Z0-9]{2})([A-Z0-9]{1,2})([A-Z0-9]{1,2})([A-Z0-9]{4})$')
+    match = pattern.match(cleaned)
+    if match:
+        state_p, dist_p, series_p, num_p = match.groups()
+        s_clean = ''.join(num_to_char.get(c, c) for c in state_p)
+        d_clean = ''.join(char_to_num.get(c, c) for c in dist_p)
+        se_clean = ''.join(num_to_char.get(c, c) for c in series_p)
+        n_clean = ''.join(char_to_num.get(c, c) for c in num_p)
+        return f"{s_clean}{d_clean}{se_clean}{n_clean}"
+
+    return cleaned
+
+def save_debug_annotated_frame(frame, face_matches, plate_results, frame_id, timestamp):
+    if not SAVE_DEBUG_FRAMES or frame is None:
+        return
+    try:
+        os.makedirs("debug_frames", exist_ok=True)
+        annotated = frame.copy()
+
+        for m in face_matches:
+            bbox = m.get("bbox", [])
+            if len(bbox) == 4:
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{m.get('name')} ({m.get('confidence', 0):.2f}) [{m.get('track_id', 'TRK')}]"
+                cv2.putText(annotated, label, (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        for p in plate_results:
+            bbox = p.get("bbox", [])
+            if len(bbox) == 4:
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                label = f"PLATE: {p.get('text')} ({p.get('confidence', 0):.2f})"
+                cv2.putText(annotated, label, (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+        cv2.putText(annotated, f"FRAME: #{frame_id} | TS: {timestamp:.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.imwrite("debug_frames/latest_debug.jpg", annotated)
+    except Exception as e:
+        print(f"[Debug Frame] Save exception: {e}")
+
+# =========================================================================
+# ENDPOINTS
+# =========================================================================
 @app.get("/")
 def home():
     is_fallback = face_analyzer.real_analyzer is None
     status_mode = "Haar Cascade Fallback Mode" if is_fallback else "InsightFace High-Precision Mode"
     return {
-        "status": "ANPR and Facial Recognition Backend Running",
-        "mode": status_mode
+        "status": "ANPR & Facial Recognition Backend Running",
+        "mode": status_mode,
+        "debug_mode": DEBUG_MODE
     }
 
-@app.post("/api/scan-plate")
-def scan_plate(file: UploadFile = File(...)):
-    contents = file.file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-    if frame is None:
-        return {"results": []}
-
-    h, w, _ = frame.shape
-    detected_plates = []
-    seen_texts = set()
-
-    # Step 1: Candidate region localization via OpenCV Morphological ANPR Pipeline
-    candidates = locate_license_plate_candidates(frame)
-    for cand in candidates:
-        crop = cand["crop"]
-        bbox = cand["bbox"]
-        
-        # Scale up candidate crop slightly for OCR enhancement
-        scaled_crop = cv2.resize(crop, (180, 60), interpolation=cv2.INTER_CUBIC)
-        gray_crop = cv2.cvtColor(scaled_crop, cv2.COLOR_BGR2GRAY)
-        
-        ocr_results = reader.readtext(gray_crop)
-        for (local_bbox, text, prob) in ocr_results:
-            cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
-            if len(cleaned) >= 2 and cleaned not in seen_texts:
-                seen_texts.add(cleaned)
-                detected_plates.append({
-                    "text": cleaned,
-                    "raw_text": text,
-                    "confidence": float(prob),
-                    "bbox": bbox
-                })
-
-    # Step 2: Single fallback scan on cropped central scanner box (320px) if no candidate crops were found
-    if not detected_plates:
-        crop_x1, crop_y1 = int(w * 0.15), int(h * 0.15)
-        crop_x2, crop_y2 = int(w * 0.85), int(h * 0.85)
-        cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        
-        if cropped.size > 0:
-            resized_scanner = cv2.resize(cropped, (320, 240), interpolation=cv2.INTER_AREA)
-            gray_scanner = cv2.cvtColor(resized_scanner, cv2.COLOR_BGR2GRAY)
-            results = reader.readtext(gray_scanner)
-
-            for (b, text, prob) in results:
-                cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
-                if len(cleaned) >= 2 and cleaned not in seen_texts:
-                    seen_texts.add(cleaned)
-                    abs_bbox = [int(w * 0.2), int(h * 0.3), int(w * 0.8), int(h * 0.7)]
-                    detected_plates.append({
-                        "text": cleaned,
-                        "raw_text": text,
-                        "confidence": float(prob),
-                        "bbox": abs_bbox
-                    })
-
-    return {"results": detected_plates}
+@app.get("/api/debug-frame")
+def get_debug_frame():
+    filepath = "debug_frames/latest_debug.jpg"
+    if os.path.exists(filepath):
+        return FileResponse(filepath, media_type="image/jpeg")
+    return {"error": "No debug frame available yet."}
 
 @app.post("/api/scan-face")
 def scan_face(
     file: UploadFile = File(...),
-    targets: str = Form(...)
+    targets: str = Form(...),
+    frame_id: int = Form(0),
+    timestamp: float = Form(0.0)
 ):
-    """Processes facial recognition on incoming frames against enrolled targets."""
+    req_ts = timestamp if timestamp > 0 else time.time()
     try:
         contents = file.file.read()
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            return {"matches": []}
+            return {"matches": [], "frame_id": frame_id, "timestamp": req_ts}
             
         try:
             target_list = json.loads(targets)
@@ -366,18 +507,20 @@ def scan_face(
                 valid_targets.append((target.get("name", "Unknown"), emb))
                 
         if not valid_targets:
-            return {"matches": []}
+            return {"matches": [], "frame_id": frame_id, "timestamp": req_ts}
             
-        # Resize query frame to max 480 to optimize scale & speed
         processed_frame, scale = resize_for_face_detection(frame, max_size=480)
-            
         faces = face_analyzer.get(processed_frame)
-        matches = []
+        
+        raw_matches = []
         is_fallback = face_analyzer.real_analyzer is None
         
+        person_conf_log = 0.0
+        person_bbox_log = []
+
         for face in faces:
             det_score = getattr(face, 'det_score', 1.0)
-            if det_score is not None and det_score < 0.60:
+            if det_score is not None and det_score < FACE_DET_SCORE_THRESHOLD:
                 continue
 
             embedding = face.embedding
@@ -394,7 +537,7 @@ def scan_face(
 
             if scores:
                 top_name, top_sim = scores[0]
-                threshold = 0.50 if is_fallback else 0.55
+                threshold = FACE_MATCH_SIM_THRESHOLD
                 
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:
@@ -403,7 +546,6 @@ def scan_face(
                         margin_valid = False
 
                 if top_sim >= threshold and margin_valid:
-                    # Rescale bounding box to original frame scale
                     raw_bbox = face.bbox.tolist() if hasattr(face.bbox, 'tolist') else list(face.bbox)
                     orig_bbox = [
                         int(raw_bbox[0] / scale),
@@ -411,17 +553,94 @@ def scan_face(
                         int(raw_bbox[2] / scale),
                         int(raw_bbox[3] / scale)
                     ]
+                    person_conf_log = top_sim
+                    person_bbox_log = orig_bbox
                     
-                    matches.append({
+                    raw_matches.append({
                         "name": top_name,
                         "confidence": float(top_sim),
                         "bbox": orig_bbox
                     })
 
-        return {"matches": matches}
+        # Apply Temporal Confirmation Tracker
+        confirmed_matches = tracker.update_face_tracks(frame_id, raw_matches)
+
+        final_decision = "CONFIRMED_MATCH" if confirmed_matches else ("RAW_MATCH" if raw_matches else "NO_FACE")
+        track_id_log = confirmed_matches[0]["track_id"] if confirmed_matches else "NONE"
+
+        if DEBUG_MODE:
+            print(f"[DEBUG_LOG] FRAME_ID={frame_id} | TIMESTAMP={req_ts:.3f} | PERSON_CONF={person_conf_log:.2f} | PERSON_BBOX={person_bbox_log} | TRACK_ID={track_id_log} | FINAL_DECISION={final_decision}")
+
+        save_debug_annotated_frame(frame, confirmed_matches, [], frame_id, req_ts)
+
+        return {
+            "matches": confirmed_matches,
+            "frame_id": frame_id,
+            "timestamp": req_ts
+        }
     except Exception as e:
         print(f"[Backend Face API] Error: {e}")
-        return {"matches": []}
+        return {"matches": [], "frame_id": frame_id, "timestamp": req_ts}
+
+@app.post("/api/scan-plate")
+def scan_plate(
+    file: UploadFile = File(...),
+    frame_id: int = Form(0),
+    timestamp: float = Form(0.0)
+):
+    req_ts = timestamp if timestamp > 0 else time.time()
+    try:
+        contents = file.file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return {"results": [], "frame_id": frame_id, "timestamp": req_ts}
+
+        h, w, _ = frame.shape
+        candidates = locate_license_plate_candidates(frame)
+        
+        ocr_raw_log = ""
+        ocr_norm_log = ""
+        ocr_conf_log = 0.0
+        plate_bbox_log = []
+
+        for cand in candidates:
+            crop = cand["crop"]
+            bbox = cand["bbox"]
+            
+            preprocessed = preprocess_plate_crop(crop)
+            if preprocessed is None:
+                continue
+
+            ocr_results = reader.readtext(preprocessed)
+            for (local_bbox, text, prob) in ocr_results:
+                if prob >= 0.25:
+                    norm_text = normalize_indian_plate(text)
+                    if len(norm_text) >= 3:
+                        ocr_raw_log = text
+                        ocr_norm_log = norm_text
+                        ocr_conf_log = float(prob)
+                        plate_bbox_log = bbox
+                        tracker.add_plate_observation(text, norm_text, float(prob), bbox, req_ts)
+
+        consensus_plate = tracker.get_plate_consensus()
+        results = [consensus_plate] if consensus_plate else []
+        final_decision = "CONFIRMED_PLATE" if results else "NO_PLATE"
+
+        if DEBUG_MODE and ocr_norm_log:
+            print(f"[DEBUG_LOG] FRAME_ID={frame_id} | TIMESTAMP={req_ts:.3f} | PLATE_CONF={ocr_conf_log:.2f} | PLATE_BBOX={plate_bbox_log} | OCR_RAW='{ocr_raw_log}' | OCR_NORM='{ocr_norm_log}' | OCR_CONF={ocr_conf_log:.2f} | FINAL_DECISION={final_decision}")
+
+        save_debug_annotated_frame(frame, [], results, frame_id, req_ts)
+
+        return {
+            "results": results,
+            "frame_id": frame_id,
+            "timestamp": req_ts
+        }
+    except Exception as e:
+        print(f"[Backend Plate API] Error: {e}")
+        return {"results": [], "frame_id": frame_id, "timestamp": req_ts}
 
 if __name__ == "__main__":
     import uvicorn
