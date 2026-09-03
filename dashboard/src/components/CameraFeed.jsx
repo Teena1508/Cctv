@@ -49,6 +49,53 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
     return false;
 }
 
+function getCropSkinRatio(imgSource, cropBox) {
+    try {
+        const offCanvas = document.createElement('canvas');
+        const sampleW = 32;
+        const sampleH = 32;
+        offCanvas.width = sampleW;
+        offCanvas.height = sampleH;
+        const ctx = offCanvas.getContext('2d');
+
+        const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
+        const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
+
+        if (!srcW || !srcH) return 0;
+
+        const sx = srcW * cropBox.x;
+        const sy = srcH * cropBox.y;
+        const sw = srcW * cropBox.w;
+        const sh = srcH * cropBox.h;
+
+        ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
+        const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
+        let skinPixels = 0;
+        const totalPixels = sampleW * sampleH;
+
+        for (let i = 0; i < totalPixels; i++) {
+            const r = imgData[i * 4];
+            const g = imgData[i * 4 + 1];
+            const b = imgData[i * 4 + 2];
+
+            const isSkin = (r > 45 && g > 30 && b > 20 &&
+                (Math.max(r, g, b) - Math.min(r, g, b) > 15) &&
+                Math.abs(r - g) > 15 && r > g && r > b) ||
+                ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 77) &&
+                 (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 127) &&
+                 (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 133) &&
+                 (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 173));
+
+            if (isSkin) skinPixels++;
+        }
+
+        return skinPixels / totalPixels;
+    } catch (e) {
+        return 0;
+    }
+}
+
 const targetSignatureCache = new Map();
 
 function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16, cropBox = null) {
@@ -437,6 +484,10 @@ export default function CameraFeed({
                                 let maxScore = -1.0;
 
                                 for (const crop of candidateCrops) {
+                                    // Face Presence Verification: reject empty room / wall / desk backgrounds
+                                    const skinRatio = getCropSkinRatio(mediaSource, crop);
+                                    if (skinRatio < 0.12) continue;
+
                                     const frameSig = getCanvasImageSignature(mediaSource, 16, 16, crop);
                                     if (!frameSig) continue;
 
@@ -457,7 +508,7 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                if (bestMatch && bestMatch.score >= 0.24) {
+                                if (bestMatch && bestMatch.score >= 0.38) {
                                     const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                     const exactTime = formatExactTimestamp(new Date());
                                     setLastMatch(`TARGET: ${targetName}`);
@@ -466,7 +517,7 @@ export default function CameraFeed({
                                     const by1 = srcHeight * bestMatch.crop.y;
                                     const bx2 = srcWidth * (bestMatch.crop.x + bestMatch.crop.w);
                                     const by2 = srcHeight * (bestMatch.crop.y + bestMatch.crop.h);
-                                    const matchConfidence = Math.min(98, Math.max(78, Math.round(55 + bestMatch.score * 50)));
+                                    const matchConfidence = Math.min(98, Math.max(78, Math.round(bestMatch.score * 100)));
 
                                     newDetections.push({
                                         type: 'FACE',
