@@ -163,7 +163,11 @@ def get_target_embedding(target):
     resized_img, _ = resize_for_face_detection(img)
     faces = face_analyzer.get(resized_img)
 
-    # Fallback to contrast-enhanced image if dim
+    # Strategy 2: Try original unscaled image if resized failed
+    if not faces and img is not None:
+        faces = face_analyzer.get(img)
+
+    # Strategy 3: Try contrast-enhanced image if dim
     if not faces and resized_img is not None and len(resized_img.shape) == 3:
         lab = cv2.cvtColor(resized_img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -173,28 +177,35 @@ def get_target_embedding(target):
         enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
         faces = face_analyzer.get(enhanced_bgr)
 
-    if not faces:
-        print(f"[Face Ingest] Haar/InsightFace missed face for '{name}'. Extracting central portrait ROI fallback...")
-        if resized_img is not None:
-            h, w = resized_img.shape[:2]
-            fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
-            gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) if len(resized_img.shape) == 3 else resized_img
-            face_crop = gray[fy:fy+fh, fx:fx+fw]
-            if face_crop.size > 0:
-                resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
-                sig_256 = resized.flatten().astype(np.float32) / 255.0
-                mean = np.mean(sig_256)
-                std = np.std(sig_256)
-                if std > 1e-4:
-                    sig_256 = (sig_256 - mean) / std
-                else:
-                    sig_256 = sig_256 - mean
-                sig_512 = np.concatenate([sig_256, sig_256])
-                class FallbackFace:
-                    def __init__(self):
-                        self.bbox = np.array([fx, fy, fx+fw, fy+fh])
-                        self.embedding = sig_512
-                faces = [FallbackFace()]
+    # Strategy 4: Central portrait crop for tight face detection
+    if not faces and img is not None:
+        h, w = img.shape[:2]
+        crop_face = img[int(h*0.05):int(h*0.95), int(w*0.05):int(w*0.95)]
+        if crop_face.size > 0:
+            faces = face_analyzer.get(crop_face)
+
+    # Strategy 5: If Haar Cascade fallback mode is active, use Haar signature
+    if not faces and face_analyzer.real_analyzer is None and resized_img is not None:
+        print(f"[Face Ingest] Haar Cascade fallback active for '{name}'. Extracting central portrait ROI signature...")
+        h, w = resized_img.shape[:2]
+        fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
+        gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) if len(resized_img.shape) == 3 else resized_img
+        face_crop = gray[fy:fy+fh, fx:fx+fw]
+        if face_crop.size > 0:
+            resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
+            sig_256 = resized.flatten().astype(np.float32) / 255.0
+            mean = np.mean(sig_256)
+            std = np.std(sig_256)
+            if std > 1e-4:
+                sig_256 = (sig_256 - mean) / std
+            else:
+                sig_256 = sig_256 - mean
+            sig_512 = np.concatenate([sig_256, sig_256])
+            class FallbackFace:
+                def __init__(self):
+                    self.bbox = np.array([fx, fy, fx+fw, fy+fh])
+                    self.embedding = sig_512
+            faces = [FallbackFace()]
                 
     if not faces:
         print(f"[Face Ingest] ⚠️ No faces found in enrolled target image for '{name}'")
@@ -208,7 +219,7 @@ def get_target_embedding(target):
         embedding = embedding / norm
         
     target_cache[image_src] = embedding
-    print(f"[Face Ingest] ✅ Cached embedding for target: '{name}'")
+    print(f"[Face Ingest] ✅ Cached embedding for target: '{name}' (Vector Dim: {len(embedding)})")
     return embedding
 
 def locate_license_plate_candidates(frame):
@@ -383,7 +394,7 @@ def scan_face(
 
             if scores:
                 top_name, top_sim = scores[0]
-                threshold = 0.50 if is_fallback else 0.45
+                threshold = 0.50 if is_fallback else 0.55
                 
                 margin_valid = True
                 if len(scores) > 1 and not is_fallback:
