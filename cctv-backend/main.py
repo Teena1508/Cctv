@@ -32,11 +32,12 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "true").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
-FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.30"))
-FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.28"))
-PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "3"))      # Require N out of M frames to confirm presence
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.25"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.25"))
+PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "1"))      # Require N out of M frames to confirm presence (1 = instant)
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
 PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
+
 
 # License Plate ANPR Thresholds
 PLATE_MIN_CONF = float(os.getenv("PLATE_MIN_CONF", "0.35"))

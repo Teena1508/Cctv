@@ -63,10 +63,12 @@ function getCropSkinRatio(imgSource, cropBox) {
 
         if (!srcW || !srcH) return 0;
 
-        const sx = srcW * cropBox.x;
-        const sy = srcH * cropBox.y;
-        const sw = srcW * cropBox.w;
-        const sh = srcH * cropBox.h;
+        const sx = Math.max(0, srcW * cropBox.x);
+        const sy = Math.max(0, srcH * cropBox.y);
+        const sw = Math.min(srcW - sx, srcW * cropBox.w);
+        const sh = Math.min(srcH - sy, srcH * cropBox.h);
+
+        if (sw <= 0 || sh <= 0) return 0;
 
         ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
         const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
@@ -96,9 +98,59 @@ function getCropSkinRatio(imgSource, cropBox) {
     }
 }
 
+function hasFaceStructure(imgSource, cropBox) {
+    try {
+        const offCanvas = document.createElement('canvas');
+        const sampleW = 24;
+        const sampleH = 24;
+        offCanvas.width = sampleW;
+        offCanvas.height = sampleH;
+        const ctx = offCanvas.getContext('2d');
+
+        const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
+        const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
+
+        if (!srcW || !srcH) return false;
+
+        const sx = Math.max(0, srcW * cropBox.x);
+        const sy = Math.max(0, srcH * cropBox.y);
+        const sw = Math.min(srcW - sx, srcW * cropBox.w);
+        const sh = Math.min(srcH - sy, srcH * cropBox.h);
+
+        if (sw <= 0 || sh <= 0) return false;
+
+        ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
+        const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
+        let totalLum = 0;
+        const lums = new Float32Array(sampleW * sampleH);
+
+        for (let i = 0; i < lums.length; i++) {
+            const r = imgData[i * 4];
+            const g = imgData[i * 4 + 1];
+            const b = imgData[i * 4 + 2];
+            lums[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+            totalLum += lums[i];
+        }
+
+        const meanLum = totalLum / lums.length;
+        let variance = 0;
+        for (let i = 0; i < lums.length; i++) {
+            variance += (lums[i] - meanLum) * (lums[i] - meanLum);
+        }
+        const stdDev = Math.sqrt(variance / lums.length);
+
+        // A real face has non-uniform luminance variation (eyes, nose, mouth) stdDev >= 0.045
+        // Uniform wall/door/desk background has flat stdDev < 0.035
+        return stdDev >= 0.045;
+    } catch (e) {
+        return false;
+    }
+}
+
 const targetSignatureCache = new Map();
 
-function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16, cropBox = null) {
+function getCanvasImageSignature(imgSource, targetWidth = 24, targetHeight = 24, cropBox = null) {
     try {
         const offCanvas = document.createElement('canvas');
         offCanvas.width = targetWidth;
@@ -109,11 +161,15 @@ function getCanvasImageSignature(imgSource, targetWidth = 16, targetHeight = 16,
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
 
         if (cropBox && srcW > 0 && srcH > 0) {
-            const sx = srcW * cropBox.x;
-            const sy = srcH * cropBox.y;
-            const sw = srcW * cropBox.w;
-            const sh = srcH * cropBox.h;
-            ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+            const sx = Math.max(0, srcW * cropBox.x);
+            const sy = Math.max(0, srcH * cropBox.y);
+            const sw = Math.min(srcW - sx, srcW * cropBox.w);
+            const sh = Math.min(srcH - sy, srcH * cropBox.h);
+            if (sw > 0 && sh > 0) {
+                ctx.drawImage(imgSource, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+            } else {
+                ctx.drawImage(imgSource, 0, 0, targetWidth, targetHeight);
+            }
         } else {
             ctx.drawImage(imgSource, 0, 0, targetWidth, targetHeight);
         }
@@ -171,16 +227,19 @@ function getTargetImageSignature(imageSrc) {
         return Promise.resolve(targetSignatureCache.get(imageSrc));
     }
     return new Promise((resolve) => {
+        const timeoutId = setTimeout(() => resolve(null), 1200);
         const img = new Image();
         if (imageSrc.startsWith('http://') || imageSrc.startsWith('https://')) {
             img.crossOrigin = 'anonymous';
         }
         img.onload = () => {
-            const sig = getCanvasImageSignature(img, 16, 16, null);
+            clearTimeout(timeoutId);
+            const sig = getCanvasImageSignature(img, 24, 24, null);
             if (sig) targetSignatureCache.set(imageSrc, sig);
             resolve(sig);
         };
         img.onerror = (err) => {
+            clearTimeout(timeoutId);
             console.warn("Failed to load target portrait image:", err);
             resolve(null);
         };
@@ -252,23 +311,23 @@ export default function CameraFeed({
         if (lastMatch) {
             const timer = setTimeout(() => {
                 setLastMatch(null);
-            }, 4000);
+            }, 1200);
             return () => clearTimeout(timer);
         }
     }, [lastMatch]);
 
-    // Clear stale bounding box overlays after 2 seconds of no update
+    // Clear stale bounding box overlays after 1.5 seconds of no update
     useEffect(() => {
         const cleanupInterval = setInterval(() => {
             if (activeDetectionsRef.current.length > 0) {
                 const now = Date.now();
-                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - d.timestamp) < 2500);
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - d.timestamp) < 1500);
             }
-        }, 1000);
+        }, 500);
         return () => clearInterval(cleanupInterval);
     }, []);
 
-    // 1. Live Webcam Stream Setup
+    // 1. Live Webcam Stream Setup with Auto-Recovery on Reload
     useEffect(() => {
         let activeStream = null;
 
@@ -287,8 +346,9 @@ export default function CameraFeed({
                 if (videoRef.current) {
                     videoRef.current.srcObject = activeStream;
                     videoRef.current.onloadedmetadata = () => {
-                        videoRef.current.play().catch(e => console.warn("Autoplay blocked:", e));
+                        if (videoRef.current) videoRef.current.play().catch(e => console.warn("Autoplay blocked:", e));
                     };
+                    videoRef.current.play().catch(() => {});
                 }
             } catch (err) {
                 console.error("Camera Access Error:", err);
@@ -298,7 +358,14 @@ export default function CameraFeed({
 
         initCamera();
 
+        const playRecoveryTimer = setInterval(() => {
+            if (videoRef.current && videoRef.current.paused && !streamUrl) {
+                videoRef.current.play().catch(() => {});
+            }
+        }, 1500);
+
         return () => {
+            clearInterval(playRecoveryTimer);
             if (activeStream) {
                 activeStream.getTracks().forEach((track) => track.stop());
             }
@@ -356,19 +423,24 @@ export default function CameraFeed({
                 const currentTimestamp = Date.now() / 1000.0;
                 let newDetections = [];
 
-                // Define parallel scanner tasks with in-flight guards
+                // Define parallel scanner tasks with AbortController & safe finally locks
                 const scanPlateTask = async () => {
                     if (!plates || plates.length === 0 || isScanningPlateRef.current) return;
                     isScanningPlateRef.current = true;
-                    const plateFormData = new FormData();
-                    plateFormData.append('file', blob, 'frame.jpg');
-                    plateFormData.append('frame_id', currentFrameId.toString());
-                    plateFormData.append('timestamp', currentTimestamp.toString());
+                    
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 2500);
 
                     try {
+                        const plateFormData = new FormData();
+                        plateFormData.append('file', blob, 'frame.jpg');
+                        plateFormData.append('frame_id', currentFrameId.toString());
+                        plateFormData.append('timestamp', currentTimestamp.toString());
+
                         const response = await fetch(`${AI_BACKEND_BASE}/api/scan-plate`, {
                             method: 'POST',
                             body: plateFormData,
+                            signal: controller.signal
                         });
 
                         if (response.ok) {
@@ -420,6 +492,7 @@ export default function CameraFeed({
                     } catch (err) {
                         setAiBackendOffline(false);
                     } finally {
+                        clearTimeout(timeoutId);
                         isScanningPlateRef.current = false;
                     }
                 };
@@ -427,18 +500,23 @@ export default function CameraFeed({
                 const scanFaceTask = async () => {
                     if (!targets || targets.length === 0 || isScanningFaceRef.current) return;
                     isScanningFaceRef.current = true;
-                    const faceFormData = new FormData();
-                    faceFormData.append('file', blob, 'frame.jpg');
-                    faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
-                    faceFormData.append('frame_id', currentFrameId.toString());
-                    faceFormData.append('timestamp', currentTimestamp.toString());
 
                     try {
                         let backendAvailable = false;
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 2500);
+
                         try {
+                            const faceFormData = new FormData();
+                            faceFormData.append('file', blob, 'frame.jpg');
+                            faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
+                            faceFormData.append('frame_id', currentFrameId.toString());
+                            faceFormData.append('timestamp', currentTimestamp.toString());
+
                             const response = await fetch(`${AI_BACKEND_BASE}/api/scan-face`, {
                                 method: 'POST',
                                 body: faceFormData,
+                                signal: controller.signal
                             });
 
                             if (response.ok) {
@@ -485,36 +563,40 @@ export default function CameraFeed({
                             }
                         } catch (backendErr) {
                             backendAvailable = false;
-                            setAiBackendOffline(false);
+                        } finally {
+                            clearTimeout(timeoutId);
                         }
 
-                        // Browser AI Scanner Fallback: ONLY runs if AI Backend server is completely offline/unreachable
+                        // Robust Browser AI Scanner Fallback: Runs whenever backend server is offline or unreachable
                         if (!backendAvailable) {
                             const mediaSource = videoRef.current || imgRef.current;
                             if (mediaSource) {
                                 const candidateCrops = [
-                                    { x: 0.15, y: 0.10, w: 0.70, h: 0.80 },
-                                    { x: 0.25, y: 0.15, w: 0.50, h: 0.65 },
-                                    { x: 0.20, y: 0.05, w: 0.60, h: 0.75 },
-                                    { x: 0.05, y: 0.05, w: 0.90, h: 0.90 }
+                                    { x: 0.20, y: 0.10, w: 0.60, h: 0.75 },
+                                    { x: 0.15, y: 0.05, w: 0.70, h: 0.85 },
+                                    { x: 0.25, y: 0.15, w: 0.50, h: 0.60 }
                                 ];
-                                const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
 
+                                const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
                                 let bestMatch = null;
                                 let maxScore = -1.0;
 
                                 for (const crop of candidateCrops) {
-                                    // Face Presence Verification: reject empty room / wall / desk backgrounds
+                                    // 1. Skin tone ratio validation
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.18) continue;
+                                    if (skinRatio < 0.20) continue;
 
-                                    const frameSig = getCanvasImageSignature(mediaSource, 16, 16, crop);
+                                    // 2. Face feature luminance structure variance check (reject flat walls/doors/chairs)
+                                    const hasStructure = hasFaceStructure(mediaSource, crop);
+                                    if (!hasStructure) continue;
+
+                                    const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
                                     if (!frameSig) continue;
 
                                     for (const target of targetList) {
                                         if (target.imageSrc) {
                                             const targetSig = await getTargetImageSignature(target.imageSrc);
-                                            if (targetSig) {
+                                            if (targetSig && targetSig.length === frameSig.length) {
                                                 let dot = 0;
                                                 for (let i = 0; i < frameSig.length; i++) {
                                                     dot += frameSig[i] * targetSig[i];
@@ -537,7 +619,7 @@ export default function CameraFeed({
                                     const by1 = srcHeight * bestMatch.crop.y;
                                     const bx2 = srcWidth * (bestMatch.crop.x + bestMatch.crop.w);
                                     const by2 = srcHeight * (bestMatch.crop.y + bestMatch.crop.h);
-                                    const matchConfidence = Math.min(98, Math.max(78, Math.round(bestMatch.score * 100)));
+                                    const matchConfidence = Math.min(99, Math.max(85, Math.round(bestMatch.score * 100)));
 
                                     newDetections.push({
                                         type: 'FACE',
@@ -561,6 +643,9 @@ export default function CameraFeed({
                                         confidence: matchConfidence,
                                         severity: 'CRITICAL',
                                     });
+                                } else {
+                                    // Instantly clear match indicator when no high-confidence face match is present
+                                    setLastMatch(null);
                                 }
                             }
                         }
@@ -755,9 +840,16 @@ export default function CameraFeed({
                 <video
                     ref={videoRef}
                     className="w-full h-full object-cover"
+                    autoPlay
                     muted
                     playsInline
                     crossOrigin="anonymous"
+                    onLoadedMetadata={() => {
+                        if (videoRef.current) videoRef.current.play().catch(() => {});
+                    }}
+                    onCanPlay={() => {
+                        if (videoRef.current) videoRef.current.play().catch(() => {});
+                    }}
                 />
             )}
 

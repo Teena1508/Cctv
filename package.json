@@ -1,7 +1,11 @@
 {
+  "scripts": {
+    "dev": "npm --prefix dashboard run dev"
+  },
   "dependencies": {
     "leaflet": "^1.9.4",
     "react-leaflet": "^5.0.0",
     "tesseract.js": "^7.0.0"
   }
 }
+

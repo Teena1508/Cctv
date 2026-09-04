@@ -7,7 +7,7 @@ import { CURRENT_NODE_LOCATION } from './config/location';
 
 import {
   Shield, Bell, Radio, MapPin, UserPlus,
-  AlertOctagon, RefreshCw, Layers, CheckCircle, Clock, Car
+  AlertOctagon, RefreshCw, Layers, CheckCircle, Clock, Car, Camera
 } from 'lucide-react';
 
 // Marker Icons Setup
@@ -55,14 +55,74 @@ const alertIcon = new L.DivIcon({
 });
 
 
+// Helper function to compress target photos into 256x256 JPEG base64 strings (~20 KB)
+function compressTargetPortrait(imageSource, maxDim = 256) {
+  return new Promise((resolve) => {
+    if (!imageSource) {
+      resolve(null);
+      return;
+    }
+    const img = new Image();
+    let blobUrl = null;
+    if (typeof imageSource === 'string' && (imageSource.startsWith('http://') || imageSource.startsWith('https://'))) {
+      img.crossOrigin = 'anonymous';
+    }
+    img.onload = () => {
+      try {
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = maxDim;
+        offCanvas.height = maxDim;
+        const ctx = offCanvas.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, maxDim, maxDim);
+
+        const srcW = img.naturalWidth || img.width || maxDim;
+        const srcH = img.naturalHeight || img.height || maxDim;
+
+        const cropW = Math.min(srcW, srcH);
+        const cropH = cropW;
+        const sx = (srcW - cropW) / 2;
+        const sy = Math.max(0, (srcH - cropH) / 4);
+
+        ctx.drawImage(img, sx, sy, cropW, cropH, 0, 0, maxDim, maxDim);
+        const compressedBase64 = offCanvas.toDataURL('image/jpeg', 0.82);
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        resolve(compressedBase64);
+      } catch (e) {
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        resolve(typeof imageSource === 'string' ? imageSource : null);
+      }
+    };
+    img.onerror = () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      resolve(typeof imageSource === 'string' ? imageSource : null);
+    };
+    if (typeof imageSource === 'string') {
+      img.src = imageSource;
+    } else {
+      blobUrl = URL.createObjectURL(imageSource);
+      img.src = blobUrl;
+    }
+  });
+}
+
+const isValidLatLng = (lat, lng) => {
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  return !isNaN(nLat) && !isNaN(nLng) && isFinite(nLat) && isFinite(nLng) && nLat !== 0 && nLng !== 0;
+};
+
 // Helper component to center map dynamically & fix tile offset issues
 function RecenterMap({ coords }) {
   const map = useMap();
   useEffect(() => {
-    if (coords && coords.length === 2 && coords[0] !== 0) {
-      // Force Leaflet to recalculate map dimensions and center properly
-      map.invalidateSize();
-      map.setView(coords, 14, { animate: true });
+    if (coords && coords.length === 2 && isValidLatLng(coords[0], coords[1])) {
+      try {
+        map.invalidateSize();
+        map.setView(coords, 14, { animate: true });
+      } catch (e) {
+        console.warn("RecenterMap exception:", e);
+      }
     }
   }, [coords, map]);
   return null;
@@ -73,17 +133,21 @@ const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost
 const CENTRAL_API_URL = `${CENTRAL_API_BASE}/api/alerts`;
 const CENTRAL_WS_URL = import.meta.env.VITE_CENTRAL_WS_URL || 'ws://localhost:8000/ws/alerts';
 
+const safelyGetArray = (key) => {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return [];
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+};
+
 export default function App() {
   const [engineMode, setEngineMode] = useState('CLIENT-SIDE');
   const [alerts, setAlerts] = useState([]);
-  const [localAlerts, setLocalAlerts] = useState(() => {
-    try {
-      const saved = localStorage.getItem('watchlist_alerts');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
+  const [localAlerts, setLocalAlerts] = useState(() => safelyGetArray('watchlist_alerts'));
   const [connected, setConnected] = useState(false);
 
   // Persist localAlerts in localStorage
@@ -117,36 +181,22 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState(null);
 
   // Dynamic Geolocation state (Tracks current physical laptop location)
-  const [laptopLocation, setLaptopLocation] = useState([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-  const [mapCenter, setMapCenter] = useState([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+  const defaultLat = Number(CURRENT_NODE_LOCATION.lat) || 28.6139;
+  const defaultLng = Number(CURRENT_NODE_LOCATION.lng) || 77.2090;
+
+  const [laptopLocation, setLaptopLocation] = useState([defaultLat, defaultLng]);
+  const [mapCenter, setMapCenter] = useState([defaultLat, defaultLng]);
   const [locationSource, setLocationSource] = useState('CONFIG'); // 'GPS' | 'IP_GEOLOCATION' | 'CONFIG' | 'DRAGGED'
   const [gpsError, setGpsError] = useState(null);
 
-  // Active watchlists initialized from localStorage
+  // Active watchlists initialized from localStorage safely
   const [enrolledTargets, setEnrolledTargets] = useState(() => {
-    try {
-      const saved = localStorage.getItem('watchlist_targets');
-      if (!saved) return [];
-      const parsed = JSON.parse(saved);
-      // Clean up stale blob URLs from previous code version to prevent backend failure on reload
-      const valid = parsed.filter(t => t && t.imageSrc && !t.imageSrc.startsWith('blob:'));
-      if (valid.length !== parsed.length) {
-        localStorage.setItem('watchlist_targets', JSON.stringify(valid));
-      }
-      return valid;
-    } catch (e) {
-      return [];
-    }
+    const list = safelyGetArray('watchlist_targets');
+    return list.filter(t => t && t.imageSrc && !t.imageSrc.startsWith('blob:'));
   });
 
-  const [enrolledPlates, setEnrolledPlates] = useState(() => {
-    try {
-      const saved = localStorage.getItem('watchlist_plates');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
+  const [enrolledPlates, setEnrolledPlates] = useState(() => safelyGetArray('watchlist_plates'));
+
 
   const ws = useRef(null);
   const [aiBackendOnline, setAiBackendOnline] = useState(true);
@@ -447,7 +497,10 @@ export default function App() {
     }
   };
 
-  const handleEnrollSubmit = (e) => {
+
+
+
+  const handleEnrollSubmit = async (e) => {
     e.preventDefault();
     if (!enrollForm.name && !selectedFile && !enrollForm.targetPlate) {
       setEnrollStatus({ loading: false, success: null, error: "Please enter a subject name + photo OR a license plate number." });
@@ -456,39 +509,104 @@ export default function App() {
 
     setEnrollStatus({ loading: true, success: null, error: null });
 
-    // Enroll Face Target with Base64 encoding
-    if (enrollForm.name && selectedFile) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const newTarget = {
-          name: enrollForm.name,
-          imageSrc: reader.result // Base64 data string accessible across components
-        };
-        const updatedTargets = [...enrolledTargets, newTarget];
-        setEnrolledTargets(updatedTargets);
-        localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
-      };
-      reader.readAsDataURL(selectedFile);
+    try {
+      let updatedTargets = [...enrolledTargets];
+      let updatedPlates = [...enrolledPlates];
+
+      // Enroll Face Target with compressed Base64 encoding
+      if (enrollForm.name && selectedFile) {
+        const compressedImage = await compressTargetPortrait(selectedFile, 256);
+        if (compressedImage) {
+          const targetName = enrollForm.name.trim() || 'TARGET';
+          const newTarget = {
+            name: targetName,
+            imageSrc: compressedImage
+          };
+          updatedTargets = [...updatedTargets.filter(t => t.name !== targetName), newTarget];
+          setEnrolledTargets(updatedTargets);
+          try {
+            localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
+          } catch (storageErr) {
+            console.warn("LocalStorage error:", storageErr);
+          }
+        }
+      }
+
+      // Enroll License Plate Target
+      if (enrollForm.targetPlate.trim()) {
+        const cleanedPlate = enrollForm.targetPlate.trim().toUpperCase();
+        if (!updatedPlates.includes(cleanedPlate)) {
+          updatedPlates = [...updatedPlates, cleanedPlate];
+          setEnrolledPlates(updatedPlates);
+          try {
+            localStorage.setItem('watchlist_plates', JSON.stringify(updatedPlates));
+          } catch (storageErr) {
+            console.warn("LocalStorage error:", storageErr);
+          }
+        }
+      }
+
+      setEnrollStatus({
+        loading: false,
+        success: `Target(s) enrolled & persisted successfully!`,
+        error: null
+      });
+
+      setEnrollForm({ name: '', targetPlate: '' });
+      setSelectedFile(null);
+    } catch (err) {
+      setEnrollStatus({ loading: false, success: null, error: "Failed to enroll target." });
     }
-
-    // Enroll License Plate Target
-    if (enrollForm.targetPlate.trim()) {
-      const cleanedPlate = enrollForm.targetPlate.trim().toUpperCase();
-      const updatedPlates = [...enrolledPlates, cleanedPlate];
-      setEnrolledPlates(updatedPlates);
-      localStorage.setItem('watchlist_plates', JSON.stringify(updatedPlates));
-    }
-
-    setEnrollStatus({
-      loading: false,
-      success: `Target(s) enrolled successfully!`,
-      error: null
-    });
-
-    setEnrollForm({ name: '', targetPlate: '' });
-    setSelectedFile(null);
   };
 
+  const handleSnapWebcamFace = async () => {
+    const targetName = enrollForm.name.trim() || 'OPERATOR_SELF';
+    setEnrollStatus({ loading: true, success: null, error: null });
+
+    try {
+      const videoEl = document.querySelector('video');
+      if (!videoEl || videoEl.videoWidth === 0) {
+        setEnrollStatus({ loading: false, success: null, error: "Webcam video feed not ready. Ensure camera is active." });
+        return;
+      }
+
+      const snapCanvas = document.createElement('canvas');
+      snapCanvas.width = 300;
+      snapCanvas.height = 300;
+      const ctx = snapCanvas.getContext('2d');
+
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      const cropDim = Math.min(vw, vh) * 0.75;
+      const sx = (vw - cropDim) / 2;
+      const sy = (vh - cropDim) / 3;
+
+      ctx.drawImage(videoEl, sx, sy, cropDim, cropDim, 0, 0, 300, 300);
+      const compressedBase64 = snapCanvas.toDataURL('image/jpeg', 0.85);
+
+      const newTarget = {
+        name: targetName,
+        imageSrc: compressedBase64
+      };
+
+      const updatedTargets = [...enrolledTargets.filter(t => t.name !== targetName), newTarget];
+      setEnrolledTargets(updatedTargets);
+      try {
+        localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
+      } catch (e) {
+        console.warn("LocalStorage error:", e);
+      }
+
+      setEnrollStatus({
+        loading: false,
+        success: `✅ Snap captured! Registered '${targetName}' to Watchlist.`,
+        error: null
+      });
+      setEnrollForm(prev => ({ ...prev, name: '' }));
+    } catch (err) {
+      setEnrollStatus({ loading: false, success: null, error: "Webcam snapshot failed." });
+    }
+  };
 
   const activeAlerts = engineMode === 'CLIENT-SIDE' ? localAlerts : alerts;
 
@@ -577,12 +695,23 @@ export default function App() {
                 />
               </div>
 
-              <button
-                type="submit"
-                className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-semibold transition-all mt-2"
-              >
-                Enroll Target to Watchlist
-              </button>
+              <div className="flex gap-2 mt-2">
+                <button
+                  type="submit"
+                  className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-all"
+                >
+                  Enroll Target to Watchlist
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSnapWebcamFace}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1"
+                  title="Capture face directly from live camera feed"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  Snap My Face
+                </button>
+              </div>
             </form>
 
             <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between text-xs text-slate-400 font-mono">
