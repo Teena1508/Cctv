@@ -196,42 +196,44 @@ class FRSEngine:
             if not faces:
                 return
 
-            primary_face = faces[0]
-            embedding = primary_face.embedding
-            
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
+            for face in faces:
+                embedding = getattr(face, 'embedding', None)
+                if embedding is None:
+                    continue
 
-            search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
-            search_res = self.milvus_client.search(
-                collection_name=COLLECTION_NAME,
-                data=[embedding.tolist()],
-                limit=1,
-                output_fields=["name"],
-                search_params=search_params
-            )
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
 
-            if search_res and len(search_res[0]) > 0:
-                match = search_res[0][0]
-                similarity = match["distance"]
-                name = match["entity"]["name"]
+                search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
+                search_res = self.milvus_client.search(
+                    collection_name=COLLECTION_NAME,
+                    data=[embedding.tolist()],
+                    limit=1,
+                    output_fields=["name"],
+                    search_params=search_params
+                )
 
-                print(f"[Matcher] Match found: '{name}' (Similarity: {similarity:.4f})")
+                if search_res and len(search_res[0]) > 0:
+                    match = search_res[0][0]
+                    similarity = match["distance"]
+                    name = match["entity"]["name"]
 
-                if similarity >= MATCH_THRESHOLD:
-                    alert_payload = {
-                        "camera_id": camera_id,
-                        "timestamp": timestamp,
-                        "event_type": "WANTED_PERSON_MATCH",
-                        "subject_name": name,
-                        "confidence": round(float(similarity), 3),
-                        "details": f"Wanted suspect '{name}' spotted inside Region of Interest.",
-                        "severity": "HIGH_PRIORITY"
-                    }
-                    
-                    self.mqtt_client.publish(MQTT_PUB_TOPIC, json.dumps(alert_payload))
-                    print(f"[Matcher] ALERT generated and sent to '{MQTT_PUB_TOPIC}' for match: {name}")
+                    print(f"[Matcher] Match found: '{name}' (Similarity: {similarity:.4f})")
+
+                    if similarity >= MATCH_THRESHOLD:
+                        alert_payload = {
+                            "camera_id": camera_id,
+                            "timestamp": timestamp,
+                            "event_type": "WANTED_PERSON_MATCH",
+                            "subject_name": name,
+                            "confidence": round(float(similarity), 3),
+                            "details": f"Wanted suspect '{name}' spotted inside Region of Interest.",
+                            "severity": "HIGH_PRIORITY"
+                        }
+                        
+                        self.mqtt_client.publish(MQTT_PUB_TOPIC, json.dumps(alert_payload))
+                        print(f"[Matcher] ALERT generated and sent to '{MQTT_PUB_TOPIC}' for match: {name}")
 
         except Exception as e:
             print(f"[Fog Event] Matcher loop exception: {e}")

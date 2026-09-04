@@ -62,14 +62,14 @@ class SmartFaceAnalyzer:
         try:
             print("[SmartFaceAnalyzer] Initializing InsightFace Buffalo_L model...")
             real = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-            real.prepare(ctx_id=0, det_size=(480, 480))
+            real.prepare(ctx_id=0, det_size=(640, 640))
             self.real_analyzer = real
             print("[SmartFaceAnalyzer] Loaded InsightFace model successfully.")
         except Exception as e:
             print(f"[SmartFaceAnalyzer] Could not load InsightFace model directly: {e}. Trying buffalo_sc...")
             try:
                 real = FaceAnalysis(name='buffalo_sc', providers=['CPUExecutionProvider'])
-                real.prepare(ctx_id=0, det_size=(480, 480))
+                real.prepare(ctx_id=0, det_size=(640, 640))
                 self.real_analyzer = real
                 print("[SmartFaceAnalyzer] Loaded InsightFace buffalo_sc successfully.")
             except Exception as ex:
@@ -97,12 +97,15 @@ class SmartFaceAnalyzer:
             
         if self.real_analyzer is not None:
             try:
-                return self.real_analyzer.get(img)
+                faces = self.real_analyzer.get(img)
+                if faces and len(faces) > 0:
+                    return faces
             except Exception as e:
                 print(f"[SmartFaceAnalyzer] InsightFace get() error: {e}. Attempting fallback...")
                 self.real_analyzer = None
-                if self.fallback_analyzer is None:
-                    self.init_fallback()
+
+        if self.fallback_analyzer is None:
+            self.init_fallback()
 
         if self.fallback_analyzer is not None:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 and img.shape[2] == 3 else img
@@ -135,12 +138,12 @@ class SmartFaceAnalyzer:
 face_analyzer = SmartFaceAnalyzer()
 target_cache = {}
 
-def resize_for_face_detection(img, max_size=480):
+def resize_for_face_detection(img, max_size=640):
     if img is None:
         return None, 1.0
     h, w = img.shape[:2]
     if w > max_size or h > max_size:
-        scale = max_size / max(w, h)
+        scale = max_size / float(max(w, h))
         new_w = int(w * scale)
         new_h = int(h * scale)
         return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA), scale
@@ -234,40 +237,60 @@ class TemporalTracker:
         xB = min(boxA[2], boxB[2])
         yB = min(boxA[3], boxB[3])
         interArea = max(0, xB - xA) * max(0, yB - yA)
-        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[0])
-        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[0])
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
         iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
         return iou
 
     def update_face_tracks(self, frame_id, detected_matches):
         """
         Updates sliding-window history for detected face matches.
+        Uses greedy bipartite spatial IoU association to track multiple faces independently.
         Enforces:
           - N out of M confirmation to mark CONFIRMED_PRESENT
           - K consecutive absent frames to mark CONFIRMED_ABSENT
         """
         with self.lock:
-            updated_track_ids = set()
             confirmed_matches = []
 
-            for det in detected_matches:
+            # 1. Build spatial overlap (IoU) candidates between existing tracks and new detections
+            candidates = []
+            for det_idx, det in enumerate(detected_matches):
+                bbox = det["bbox"]
+                det_name = det["name"]
+
+                for t_id, track in self.tracks.items():
+                    iou = self.calculate_iou(bbox, track["last_bbox"])
+                    name_boost = 0.05 if (track["name"] == det_name or track["name"] == "UNAUTHORIZED PERSON") else 0.0
+                    score = iou + name_boost
+
+                    if iou >= 0.15:
+                        candidates.append((score, iou, t_id, det_idx))
+
+            # 2. Sort candidate assignments by descending score/IoU
+            candidates.sort(key=lambda x: x[0], reverse=True)
+
+            claimed_tracks = set()
+            claimed_dets = set()
+            assignments = {}
+
+            for score, iou, t_id, det_idx in candidates:
+                if t_id not in claimed_tracks and det_idx not in claimed_dets:
+                    claimed_tracks.add(t_id)
+                    claimed_dets.add(det_idx)
+                    assignments[det_idx] = t_id
+
+            # 3. Process matched detections and create new tracks for unmatched detections
+            updated_track_ids = set()
+
+            for det_idx, det in enumerate(detected_matches):
                 bbox = det["bbox"]
                 name = det["name"]
                 conf = det["confidence"]
 
-                # Match with existing active tracks using IoU & subject name
-                best_track_id = None
-                best_iou = 0.0
-
-                for t_id, track in self.tracks.items():
-                    if track["name"] == name:
-                        iou = self.calculate_iou(bbox, track["last_bbox"])
-                        if iou > 0.20 and iou > best_iou:
-                            best_iou = iou
-                            best_track_id = t_id
-
-                if best_track_id is None:
-                    # Create new track
+                if det_idx in assignments:
+                    best_track_id = assignments[det_idx]
+                else:
                     best_track_id = f"TRACK-{self.next_track_id:03d}"
                     self.next_track_id += 1
                     self.tracks[best_track_id] = {
@@ -281,22 +304,23 @@ class TemporalTracker:
 
                 track = self.tracks[best_track_id]
                 track["last_bbox"] = bbox
+                if name != "UNAUTHORIZED PERSON" or track["name"] == "UNAUTHORIZED PERSON":
+                    track["name"] = name
                 track["window"].append(True)
                 track["absent_count"] = 0
                 updated_track_ids.add(best_track_id)
 
-                # Evaluate presence (return match immediately on frame 1 while tracking state)
                 hits = sum(track["window"])
                 track["status"] = "CONFIRMED_PRESENT" if hits >= PERSON_CONFIRM_N else "DETECTED"
                 confirmed_matches.append({
-                    "name": name,
+                    "name": track["name"],
                     "confidence": conf,
                     "bbox": bbox,
                     "track_id": best_track_id,
                     "status": track["status"]
                 })
 
-            # Update absent tracks
+            # 4. Update absent tracks that received no detection in this frame
             for t_id, track in list(self.tracks.items()):
                 if t_id not in updated_track_ids:
                     track["window"].append(False)
@@ -507,10 +531,8 @@ def scan_face(
             if emb is not None:
                 valid_targets.append((target.get("name", "Unknown"), emb))
                 
-        if not valid_targets:
-            return {"matches": [], "frame_id": frame_id, "timestamp": req_ts}
-            
-        processed_frame, scale = resize_for_face_detection(frame, max_size=480)
+        # Process face detection regardless of whether target_list is empty
+        processed_frame, scale = resize_for_face_detection(frame, max_size=640)
         faces = face_analyzer.get(processed_frame)
         
         raw_matches = []
