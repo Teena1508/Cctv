@@ -461,9 +461,10 @@ export default function App() {
   // HANDLER: Continuous Feed with Detection & Off-Hours Restricted Zone Rules Evaluator
   const handleDetection = (detection) => {
     const activeRestrictedRules = restrictedRulesRef.current.filter(r => r.enabled);
+    const isUnauthorizedPerson = detection.subject === 'UNAUTHORIZED PERSON' || detection.eventType === 'UNAUTHORIZED PRESENCE';
 
-    // 1. Silent Camera Mode: Block detection alerts if neither watchlist targets, plates, NOR active restricted rules are present
-    if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0) {
+    // 1. Silent Camera Mode: Allow detection if enrolled targets, enrolled plates, active restricted rules exist, OR if an un-enrolled intruder is detected!
+    if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0 && !isUnauthorizedPerson) {
       return;
     }
 
@@ -493,7 +494,7 @@ export default function App() {
     for (const rule of activeRulesForCam) {
       if (isTimeInWindow(now, rule.startTime, rule.endTime)) {
         if (rule.constraint === 'PERSON_ONLY' && detection.eventType === 'PLATE MATCH') continue;
-        if (rule.constraint === 'VEHICLE_ONLY' && detection.eventType === 'TARGET MATCH') continue;
+        if (rule.constraint === 'VEHICLE_ONLY' && (detection.eventType === 'TARGET MATCH' || isUnauthorizedPerson)) continue;
 
         isRestrictedIntrusion = true;
         matchingRuleName = rule.name;
@@ -509,14 +510,14 @@ export default function App() {
       camera_id: currentCam.id,
       event_type: isRestrictedIntrusion
         ? 'RESTRICTED INTRUSION'
-        : (detection.eventType || (enrolledTargets.length > 0 ? 'TARGET MATCH' : 'PLATE MATCH')),
-      severity: 'CRITICAL',
+        : (isUnauthorizedPerson ? 'UNAUTHORIZED PRESENCE' : (detection.eventType || 'TARGET MATCH')),
+      severity: isRestrictedIntrusion ? 'CRITICAL' : (isUnauthorizedPerson ? 'HIGH' : 'CRITICAL'),
       details: isRestrictedIntrusion
         ? `🚨 Off-Hours Restricted Intrusion: Rule '${matchingRuleName}' (${matchingTimeWindow}) triggered at ${currentCam.id}`
-        : (detection.details || `Matched Target: ${enrolledTargets[enrolledTargets.length - 1]?.name || enrolledPlates[enrolledPlates.length - 1]}`),
+        : (detection.details || `Spotted on camera feed: ${detection.subject || 'UNAUTHORIZED PERSON'}`),
       subject: isRestrictedIntrusion
         ? `UNAUTHORIZED PRESENCE (${detection.subject || 'SUSPECT'})`
-        : (detection.subject || enrolledTargets[enrolledTargets.length - 1]?.name || 'UNKNOWN VEHICLE'),
+        : (detection.subject || 'UNAUTHORIZED PERSON'),
       lat: currentCam.lat,
       lng: currentCam.lng,
       address: currentCam.address,

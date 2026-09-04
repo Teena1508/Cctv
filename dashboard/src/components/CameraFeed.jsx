@@ -5,6 +5,12 @@ import { CURRENT_NODE_LOCATION } from '../config/location';
 const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
 const HAS_AI_BACKEND = Boolean(AI_BACKEND_BASE);
 
+// Singletons for offscreen canvas operations to completely avoid GPU/memory leaks & GC freezes
+const sharedFrameCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+const sharedSkinCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+const sharedStructureCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+const sharedSignatureCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+
 function formatExactTimestamp(dateObj = new Date()) {
     const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth() + 1).padStart(2, '0');
@@ -27,15 +33,12 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
     const e = enrolledStr.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (!d || !e) return false;
 
-    // Exact or substring match
     if (d.includes(e) || e.includes(d)) return true;
 
-    // Character normalization (0/O, 1/I, etc.)
     const normD = d.split('').map(normalizePlateChar).join('');
     const normE = e.split('').map(normalizePlateChar).join('');
     if (normD.includes(normE) || normE.includes(normD)) return true;
 
-    // Levenshtein distance tolerance
     if (Math.abs(normD.length - normE.length) <= 2 && normE.length >= 4) {
         let diffs = 0;
         const minLen = Math.min(normD.length, normE.length);
@@ -51,12 +54,15 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
 
 function getCropSkinRatio(imgSource, cropBox) {
     try {
-        const offCanvas = document.createElement('canvas');
+        if (!sharedSkinCanvas) return 0;
         const sampleW = 32;
         const sampleH = 32;
-        offCanvas.width = sampleW;
-        offCanvas.height = sampleH;
-        const ctx = offCanvas.getContext('2d');
+        if (sharedSkinCanvas.width !== sampleW || sharedSkinCanvas.height !== sampleH) {
+            sharedSkinCanvas.width = sampleW;
+            sharedSkinCanvas.height = sampleH;
+        }
+        const ctx = sharedSkinCanvas.getContext('2d');
+        if (!ctx) return 0;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
@@ -81,9 +87,9 @@ function getCropSkinRatio(imgSource, cropBox) {
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
 
-            const isSkin = (r > 45 && g > 30 && b > 20 &&
-                (Math.max(r, g, b) - Math.min(r, g, b) > 15) &&
-                Math.abs(r - g) > 15 && r > g && r > b) ||
+            const isSkin = (r > 40 && g > 25 && b > 15 &&
+                (Math.max(r, g, b) - Math.min(r, g, b) > 12) &&
+                Math.abs(r - g) > 12 && r > g && r > b) ||
                 ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 77) &&
                  (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 127) &&
                  (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 133) &&
@@ -100,12 +106,15 @@ function getCropSkinRatio(imgSource, cropBox) {
 
 function hasFaceStructure(imgSource, cropBox) {
     try {
-        const offCanvas = document.createElement('canvas');
+        if (!sharedStructureCanvas) return false;
         const sampleW = 24;
         const sampleH = 24;
-        offCanvas.width = sampleW;
-        offCanvas.height = sampleH;
-        const ctx = offCanvas.getContext('2d');
+        if (sharedStructureCanvas.width !== sampleW || sharedStructureCanvas.height !== sampleH) {
+            sharedStructureCanvas.width = sampleW;
+            sharedStructureCanvas.height = sampleH;
+        }
+        const ctx = sharedStructureCanvas.getContext('2d');
+        if (!ctx) return false;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
@@ -140,9 +149,7 @@ function hasFaceStructure(imgSource, cropBox) {
         }
         const stdDev = Math.sqrt(variance / lums.length);
 
-        // A real face has non-uniform luminance variation (eyes, nose, mouth) stdDev >= 0.045
-        // Uniform wall/door/desk background has flat stdDev < 0.035
-        return stdDev >= 0.045;
+        return stdDev >= 0.038;
     } catch (e) {
         return false;
     }
@@ -152,10 +159,13 @@ const targetSignatureCache = new Map();
 
 function getCanvasImageSignature(imgSource, targetWidth = 24, targetHeight = 24, cropBox = null) {
     try {
-        const offCanvas = document.createElement('canvas');
-        offCanvas.width = targetWidth;
-        offCanvas.height = targetHeight;
-        const ctx = offCanvas.getContext('2d');
+        if (!sharedSignatureCanvas) return null;
+        if (sharedSignatureCanvas.width !== targetWidth || sharedSignatureCanvas.height !== targetHeight) {
+            sharedSignatureCanvas.width = targetWidth;
+            sharedSignatureCanvas.height = targetHeight;
+        }
+        const ctx = sharedSignatureCanvas.getContext('2d');
+        if (!ctx) return null;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
         const srcH = imgSource.videoHeight || imgSource.naturalHeight || imgSource.height || 480;
@@ -184,7 +194,6 @@ function getCanvasImageSignature(imgSource, targetWidth = 24, targetHeight = 24,
             grid[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
         }
 
-        // Extract luminance + Sobel gradient feature vector (captures facial contours & structure)
         const vec = new Float32Array(targetWidth * targetHeight * 2);
         let idx = 0;
         let sum = 0;
@@ -269,6 +278,7 @@ export default function CameraFeed({
     const frameCounterRef = useRef(0);
     const lastProcessedFaceFrameRef = useRef(0);
     const lastProcessedPlateFrameRef = useRef(0);
+    const lastScanTickRef = useRef(Date.now());
 
     const triggerAlertThrottled = (subjectKey, alertData) => {
         const now = Date.now();
@@ -359,7 +369,7 @@ export default function CameraFeed({
         initCamera();
 
         const playRecoveryTimer = setInterval(() => {
-            if (videoRef.current && videoRef.current.paused && !streamUrl) {
+            if (videoRef.current && (videoRef.current.paused || videoRef.current.ended) && !streamUrl) {
                 videoRef.current.play().catch(() => {});
             }
         }, 1500);
@@ -374,16 +384,29 @@ export default function CameraFeed({
 
     const captureFrameBlob = (mediaSource, width, height) => {
         return new Promise((resolve) => {
-            const frameCanvas = document.createElement('canvas');
-            frameCanvas.width = width;
-            frameCanvas.height = height;
-            const ctx = frameCanvas.getContext('2d');
-            ctx.drawImage(mediaSource, 0, 0, width, height);
-            frameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.90);
+            try {
+                if (!sharedFrameCanvas) {
+                    resolve(null);
+                    return;
+                }
+                if (sharedFrameCanvas.width !== width || sharedFrameCanvas.height !== height) {
+                    sharedFrameCanvas.width = width;
+                    sharedFrameCanvas.height = height;
+                }
+                const ctx = sharedFrameCanvas.getContext('2d');
+                if (!ctx) {
+                    resolve(null);
+                    return;
+                }
+                ctx.drawImage(mediaSource, 0, 0, width, height);
+                sharedFrameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.90);
+            } catch (e) {
+                resolve(null);
+            }
         });
     };
 
-    // 2. Snapshot Scanning Loop (Plates & Faces)
+    // 2. Snapshot Scanning Loop (Plates, Watchlist Faces, & Un-enrolled Intruder Detection)
     useEffect(() => {
         let isProcessingFrame = false;
 
@@ -391,6 +414,14 @@ export default function CameraFeed({
             const plates = enrolledPlatesRef.current;
             const targets = enrolledTargetsRef.current;
             const activeLoc = activeLocationRef.current;
+
+            // Watchdog lock self-healing: if stalled >3.0s, force-reset locks
+            if (Date.now() - lastScanTickRef.current > 3000) {
+                isScanningFaceRef.current = false;
+                isScanningPlateRef.current = false;
+                isProcessingFrame = false;
+            }
+            lastScanTickRef.current = Date.now();
 
             if (isProcessingFrame) return;
 
@@ -447,7 +478,7 @@ export default function CameraFeed({
                             setAiBackendOffline(false);
                             const data = await response.json();
                             if (data.frame_id && data.frame_id < lastProcessedPlateFrameRef.current) {
-                                return; // Discard out-of-order stale response
+                                return;
                             }
                             if (data.frame_id) lastProcessedPlateFrameRef.current = data.frame_id;
 
@@ -498,7 +529,7 @@ export default function CameraFeed({
                 };
 
                 const scanFaceTask = async () => {
-                    if (!targets || targets.length === 0 || isScanningFaceRef.current) return;
+                    if (isScanningFaceRef.current) return;
                     isScanningFaceRef.current = true;
 
                     try {
@@ -509,7 +540,7 @@ export default function CameraFeed({
                         try {
                             const faceFormData = new FormData();
                             faceFormData.append('file', blob, 'frame.jpg');
-                            faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets));
+                            faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets || []));
                             faceFormData.append('frame_id', currentFrameId.toString());
                             faceFormData.append('timestamp', currentTimestamp.toString());
 
@@ -524,7 +555,7 @@ export default function CameraFeed({
                                 setAiBackendOffline(false);
                                 const data = await response.json();
                                 if (data.frame_id && data.frame_id < lastProcessedFaceFrameRef.current) {
-                                    return; // Discard out-of-order stale response
+                                    return;
                                 }
                                 if (data.frame_id) lastProcessedFaceFrameRef.current = data.frame_id;
 
@@ -532,31 +563,35 @@ export default function CameraFeed({
                                     data.matches.forEach((face) => {
                                         const exactTime = formatExactTimestamp(new Date());
                                         const targetName = face.name || face.label || 'UNKNOWN';
-                                        setLastMatch(`TARGET: ${targetName}`);
+                                        const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN';
+
+                                        setLastMatch(isUnauthorized ? 'INTRUDER DETECTED' : `TARGET: ${targetName}`);
 
                                         if (face.bbox) {
                                             newDetections.push({
                                                 type: 'FACE',
-                                                label: `FACE: ${targetName}`,
+                                                label: isUnauthorized ? `FACE: UNAUTHORIZED PERSON` : `FACE: ${targetName}`,
                                                 bbox: face.bbox,
-                                                confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
+                                                confidence: face.confidence ? Math.round(face.confidence * 100) : (isUnauthorized ? 88 : 92),
                                                 timestamp: currentTimestamp
                                             });
                                         }
 
-                                        triggerAlertThrottled(`FACE_${targetName}`, {
+                                        triggerAlertThrottled(isUnauthorized ? `INTRUDER_${cameraId}` : `FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                            eventType: 'TARGET MATCH',
+                                            eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
                                             subject: targetName,
-                                            details: `High-precision facial match identified on ${cameraId}`,
+                                            details: isUnauthorized
+                                                ? `Unenrolled person spotted in live camera feed on ${cameraId}`
+                                                : `High-precision facial match identified on ${cameraId}`,
                                             lat: activeLoc.lat,
                                             lng: activeLoc.lng,
                                             address: activeLoc.address,
                                             cameraId: cameraId,
                                             cameraName: cameraName,
                                             timestamp: exactTime,
-                                            confidence: face.confidence ? Math.round(face.confidence * 100) : 92,
-                                            severity: 'CRITICAL',
+                                            confidence: face.confidence ? Math.round(face.confidence * 100) : (isUnauthorized ? 88 : 92),
+                                            severity: isUnauthorized ? 'HIGH' : 'CRITICAL',
                                         });
                                     });
                                 }
@@ -572,26 +607,28 @@ export default function CameraFeed({
                             const mediaSource = videoRef.current || imgRef.current;
                             if (mediaSource) {
                                 const candidateCrops = [
-                                    { x: 0.20, y: 0.10, w: 0.60, h: 0.75 },
                                     { x: 0.15, y: 0.05, w: 0.70, h: 0.85 },
+                                    { x: 0.20, y: 0.10, w: 0.60, h: 0.75 },
+                                    { x: 0.05, y: 0.05, w: 0.90, h: 0.90 },
                                     { x: 0.25, y: 0.15, w: 0.50, h: 0.60 }
                                 ];
 
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
-                                let bestMatch = null;
+                                let bestEnrolledMatch = null;
                                 let maxScore = -1.0;
+                                let detectedFaceCrop = null;
 
                                 for (const crop of candidateCrops) {
-                                    // 1. Skin tone ratio validation
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.20) continue;
+                                    if (skinRatio < 0.12) continue;
 
-                                    // 2. Face feature luminance structure variance check (reject flat walls/doors/chairs)
                                     const hasStructure = hasFaceStructure(mediaSource, crop);
                                     if (!hasStructure) continue;
 
+                                    detectedFaceCrop = crop;
+
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
-                                    if (!frameSig) continue;
+                                    if (!frameSig || !targetList || targetList.length === 0) break;
 
                                     for (const target of targetList) {
                                         if (target.imageSrc) {
@@ -603,48 +640,76 @@ export default function CameraFeed({
                                                 }
                                                 if (dot > maxScore) {
                                                     maxScore = dot;
-                                                    bestMatch = { target, crop, score: dot };
+                                                    bestEnrolledMatch = { target, crop, score: dot };
                                                 }
                                             }
                                         }
                                     }
                                 }
 
-                                if (bestMatch && bestMatch.score >= 0.65) {
-                                    const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
+                                if (detectedFaceCrop) {
                                     const exactTime = formatExactTimestamp(new Date());
-                                    setLastMatch(`TARGET: ${targetName}`);
+                                    const crop = detectedFaceCrop;
+                                    const bx1 = srcWidth * crop.x;
+                                    const by1 = srcHeight * crop.y;
+                                    const bx2 = srcWidth * (crop.x + crop.w);
+                                    const by2 = srcHeight * (crop.y + crop.h);
 
-                                    const bx1 = srcWidth * bestMatch.crop.x;
-                                    const by1 = srcHeight * bestMatch.crop.y;
-                                    const bx2 = srcWidth * (bestMatch.crop.x + bestMatch.crop.w);
-                                    const by2 = srcHeight * (bestMatch.crop.y + bestMatch.crop.h);
-                                    const matchConfidence = Math.min(99, Math.max(85, Math.round(bestMatch.score * 100)));
+                                    if (bestEnrolledMatch && bestEnrolledMatch.score >= 0.55) {
+                                        const targetName = bestEnrolledMatch.target.name || 'WATCHLIST TARGET';
+                                        setLastMatch(`TARGET: ${targetName}`);
+                                        const matchConfidence = Math.min(99, Math.max(85, Math.round(bestEnrolledMatch.score * 100)));
 
-                                    newDetections.push({
-                                        type: 'FACE',
-                                        label: `FACE: ${targetName}`,
-                                        bbox: [bx1, by1, bx2, by2],
-                                        confidence: matchConfidence,
-                                        timestamp: currentTimestamp
-                                    });
+                                        newDetections.push({
+                                            type: 'FACE',
+                                            label: `FACE: ${targetName}`,
+                                            bbox: [bx1, by1, bx2, by2],
+                                            confidence: matchConfidence,
+                                            timestamp: currentTimestamp
+                                        });
 
-                                    triggerAlertThrottled(`FACE_${targetName}`, {
-                                        id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                        eventType: 'TARGET MATCH',
-                                        subject: targetName,
-                                        details: `Live Browser AI matched target portrait on ${cameraId}`,
-                                        lat: activeLoc.lat,
-                                        lng: activeLoc.lng,
-                                        address: activeLoc.address,
-                                        cameraId: cameraId,
-                                        cameraName: cameraName,
-                                        timestamp: exactTime,
-                                        confidence: matchConfidence,
-                                        severity: 'CRITICAL',
-                                    });
+                                        triggerAlertThrottled(`FACE_${targetName}`, {
+                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                            eventType: 'TARGET MATCH',
+                                            subject: targetName,
+                                            details: `Live Browser AI matched target portrait on ${cameraId}`,
+                                            lat: activeLoc.lat,
+                                            lng: activeLoc.lng,
+                                            address: activeLoc.address,
+                                            cameraId: cameraId,
+                                            cameraName: cameraName,
+                                            timestamp: exactTime,
+                                            confidence: matchConfidence,
+                                            severity: 'CRITICAL',
+                                        });
+                                    } else {
+                                        const intruderLabel = 'UNAUTHORIZED PERSON';
+                                        setLastMatch(`INTRUDER DETECTED`);
+
+                                        newDetections.push({
+                                            type: 'FACE',
+                                            label: `FACE: ${intruderLabel}`,
+                                            bbox: [bx1, by1, bx2, by2],
+                                            confidence: 88,
+                                            timestamp: currentTimestamp
+                                        });
+
+                                        triggerAlertThrottled(`INTRUDER_${cameraId}`, {
+                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                            eventType: 'UNAUTHORIZED PRESENCE',
+                                            subject: intruderLabel,
+                                            details: `Unenrolled person spotted in live camera feed on ${cameraId}`,
+                                            lat: activeLoc.lat,
+                                            lng: activeLoc.lng,
+                                            address: activeLoc.address,
+                                            cameraId: cameraId,
+                                            cameraName: cameraName,
+                                            timestamp: exactTime,
+                                            confidence: 88,
+                                            severity: 'HIGH',
+                                        });
+                                    }
                                 } else {
-                                    // Instantly clear match indicator when no high-confidence face match is present
                                     setLastMatch(null);
                                 }
                             }
@@ -656,7 +721,6 @@ export default function CameraFeed({
                     }
                 };
 
-                // Execute scanners concurrently in parallel
                 await Promise.all([scanFaceTask(), scanPlateTask()]);
 
                 activeDetectionsRef.current = newDetections;
@@ -687,40 +751,36 @@ export default function CameraFeed({
 
                 ctx.clearRect(0, 0, width, height);
 
-                const hasActiveWatchlist = (enrolledPlates && enrolledPlates.length > 0) || (enrolledTargets && enrolledTargets.length > 0);
+                const boxX = width * 0.15;
+                const boxY = height * 0.15;
+                const boxW = width * 0.70;
+                const boxH = height * 0.70;
 
-                if (hasActiveWatchlist) {
-                    const boxX = width * 0.15;
-                    const boxY = height * 0.15;
-                    const boxW = width * 0.70;
-                    const boxH = height * 0.70;
+                // Central Scanner Box
+                ctx.strokeStyle = lastMatch ? '#10b981' : '#f59e0b';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-                    // Central Scanner Box
-                    ctx.strokeStyle = lastMatch ? '#10b981' : '#f59e0b';
-                    ctx.lineWidth = 3;
-                    ctx.strokeRect(boxX, boxY, boxW, boxH);
+                // Scan line
+                const scanLineY = boxY + ((Math.sin(Date.now() / 250) + 1) / 2) * boxH;
+                ctx.strokeStyle = lastMatch ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(boxX, scanLineY);
+                ctx.lineTo(boxX + boxW, scanLineY);
+                ctx.stroke();
 
-                    // Scan line
-                    const scanLineY = boxY + ((Math.sin(Date.now() / 250) + 1) / 2) * boxH;
-                    ctx.strokeStyle = lastMatch ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(boxX, scanLineY);
-                    ctx.lineTo(boxX + boxW, scanLineY);
-                    ctx.stroke();
+                // Status Bar Header
+                ctx.fillStyle = lastMatch ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
+                ctx.fillRect(boxX, boxY - 30, boxW, 30);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 14px monospace';
 
-                    // Status Bar Header
-                    ctx.fillStyle = lastMatch ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
-                    ctx.fillRect(boxX, boxY - 30, boxW, 30);
-                    ctx.fillStyle = '#ffffff';
-                    ctx.font = 'bold 14px monospace';
+                const labelText = lastMatch
+                    ? `MATCH DETECTED: ${lastMatch}`
+                    : (isScanning ? 'AI SCANNER ACTIVE...' : 'DETECTION ENGINE READY');
 
-                    const labelText = lastMatch
-                        ? `MATCH DETECTED: ${lastMatch}`
-                        : (isScanning ? 'AI SCANNER ACTIVE...' : 'DETECTION ENGINE READY');
-
-                    ctx.fillText(labelText, boxX + 10, boxY - 10);
-                }
+                ctx.fillText(labelText, boxX + 10, boxY - 10);
 
                 // Render Bounding Boxes for Active Detections (Faces & License Plates)
                 if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
@@ -731,10 +791,10 @@ export default function CameraFeed({
                             const bh = y2 - y1;
 
                             const isFace = det.type === 'FACE';
-                            const boxColor = isFace ? '#10b981' : '#3b82f6';
-                            const bgColor = isFace ? 'rgba(6, 78, 59, 0.90)' : 'rgba(30, 58, 138, 0.90)';
+                            const isUnauth = det.label && det.label.includes('UNAUTHORIZED');
+                            const boxColor = isUnauth ? '#f43f5e' : (isFace ? '#10b981' : '#3b82f6');
+                            const bgColor = isUnauth ? 'rgba(159, 18, 57, 0.95)' : (isFace ? 'rgba(6, 78, 59, 0.90)' : 'rgba(30, 58, 138, 0.90)');
 
-                            // Bounding Box Rectangle with Glowing Stroke
                             ctx.strokeStyle = boxColor;
                             ctx.lineWidth = 3;
                             ctx.shadowColor = boxColor;
@@ -742,35 +802,32 @@ export default function CameraFeed({
                             ctx.strokeRect(x1, y1, bw, bh);
                             ctx.shadowBlur = 0;
 
-                            // Corner Accents
                             const cornerLen = Math.min(15, bw * 0.2, bh * 0.2);
                             ctx.lineWidth = 4;
-                            // Top-Left
                             ctx.beginPath();
                             ctx.moveTo(x1, y1 + cornerLen);
                             ctx.lineTo(x1, y1);
                             ctx.lineTo(x1 + cornerLen, y1);
                             ctx.stroke();
-                            // Top-Right
+
                             ctx.beginPath();
                             ctx.moveTo(x2 - cornerLen, y1);
                             ctx.lineTo(x2, y1);
                             ctx.lineTo(x2, y1 + cornerLen);
                             ctx.stroke();
-                            // Bottom-Left
+
                             ctx.beginPath();
                             ctx.moveTo(x1, y2 - cornerLen);
                             ctx.lineTo(x1, y2);
                             ctx.lineTo(x1 + cornerLen, y2);
                             ctx.stroke();
-                            // Bottom-Right
+
                             ctx.beginPath();
                             ctx.moveTo(x2 - cornerLen, y2);
                             ctx.lineTo(x2, y2);
                             ctx.lineTo(x2, y2 - cornerLen);
                             ctx.stroke();
 
-                            // Label Tag Badge Above Box
                             const text = `${det.label} (${det.confidence}%)`;
                             ctx.font = 'bold 12px monospace';
                             const textMetrics = ctx.measureText(text);

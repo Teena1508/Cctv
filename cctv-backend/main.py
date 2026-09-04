@@ -520,48 +520,66 @@ def scan_face(
         person_bbox_log = []
 
         for face in faces:
-            det_score = getattr(face, 'det_score', 1.0)
+            det_score = getattr(face, 'det_score', 0.88)
             if det_score is not None and det_score < FACE_DET_SCORE_THRESHOLD:
                 continue
 
-            embedding = face.embedding
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
+            raw_bbox = face.bbox.tolist() if hasattr(face.bbox, 'tolist') else list(face.bbox)
+            orig_bbox = [
+                int(raw_bbox[0] / scale),
+                int(raw_bbox[1] / scale),
+                int(raw_bbox[2] / scale),
+                int(raw_bbox[3] / scale)
+            ]
 
-            person_scores = {}
-            for name, target_emb in valid_targets:
-                similarity = float(np.dot(embedding, target_emb))
-                person_scores[name] = max(person_scores.get(name, -1.0), similarity)
+            embedding = getattr(face, 'embedding', None)
+            top_name = None
+            top_sim = 0.0
 
-            scores = sorted([(name, sim) for name, sim in person_scores.items()], key=lambda x: x[1], reverse=True)
+            if embedding is not None and valid_targets:
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
 
-            if scores:
-                top_name, top_sim = scores[0]
-                threshold = FACE_MATCH_SIM_THRESHOLD
-                
-                margin_valid = True
-                if len(scores) > 1 and not is_fallback:
-                    second_name, second_sim = scores[1]
-                    if second_sim > 0.20 and (top_sim - second_sim) < 0.03:
-                        margin_valid = False
+                person_scores = {}
+                for name, target_emb in valid_targets:
+                    similarity = float(np.dot(embedding, target_emb))
+                    person_scores[name] = max(person_scores.get(name, -1.0), similarity)
 
-                if top_sim >= threshold and margin_valid:
-                    raw_bbox = face.bbox.tolist() if hasattr(face.bbox, 'tolist') else list(face.bbox)
-                    orig_bbox = [
-                        int(raw_bbox[0] / scale),
-                        int(raw_bbox[1] / scale),
-                        int(raw_bbox[2] / scale),
-                        int(raw_bbox[3] / scale)
-                    ]
-                    person_conf_log = top_sim
-                    person_bbox_log = orig_bbox
+                scores = sorted([(name, sim) for name, sim in person_scores.items()], key=lambda x: x[1], reverse=True)
+
+                if scores:
+                    candidate_name, candidate_sim = scores[0]
+                    threshold = FACE_MATCH_SIM_THRESHOLD
                     
-                    raw_matches.append({
-                        "name": top_name,
-                        "confidence": float(top_sim),
-                        "bbox": orig_bbox
-                    })
+                    margin_valid = True
+                    if len(scores) > 1 and not is_fallback:
+                        second_name, second_sim = scores[1]
+                        if second_sim > 0.20 and (candidate_sim - second_sim) < 0.03:
+                            margin_valid = False
+
+                    if candidate_sim >= threshold and margin_valid:
+                        top_name = candidate_name
+                        top_sim = candidate_sim
+
+            if top_name is not None:
+                person_conf_log = top_sim
+                person_bbox_log = orig_bbox
+                raw_matches.append({
+                    "name": top_name,
+                    "confidence": float(top_sim),
+                    "bbox": orig_bbox
+                })
+            else:
+                # UN-ENROLLED PERSON / INTRUDER DETECTED
+                unauth_conf = float(det_score if det_score is not None else 0.88)
+                person_conf_log = unauth_conf
+                person_bbox_log = orig_bbox
+                raw_matches.append({
+                    "name": "UNAUTHORIZED PERSON",
+                    "confidence": unauth_conf,
+                    "bbox": orig_bbox
+                })
 
         # Apply Temporal Confirmation Tracker
         confirmed_matches = tracker.update_face_tracks(frame_id, raw_matches)
