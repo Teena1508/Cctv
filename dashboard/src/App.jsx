@@ -128,6 +128,30 @@ function RecenterMap({ coords }) {
   return null;
 }
 
+function isTimeInWindow(now = new Date(), startTimeStr = '22:00', endTimeStr = '06:00') {
+  if (!startTimeStr || !endTimeStr) return true;
+  try {
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+
+    const [sH, sM] = startTimeStr.split(':').map(Number);
+    const [eH, eM] = endTimeStr.split(':').map(Number);
+    const startMin = sH * 60 + sM;
+    const endMin = eH * 60 + eM;
+
+    if (startMin === endMin) return true; // All day / 24 hour restriction
+
+    if (startMin < endMin) {
+      // Same-day range (e.g. 08:00 to 18:00)
+      return nowMin >= startMin && nowMin <= endMin;
+    } else {
+      // Overnight range (e.g. 22:00 to 06:00)
+      return nowMin >= startMin || nowMin <= endMin;
+    }
+  } catch (e) {
+    return true;
+  }
+}
+
 const CENTRAL_API_BASE = import.meta.env.VITE_CENTRAL_API_URL || 'http://localhost:8000';
 const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
 const CENTRAL_API_URL = `${CENTRAL_API_BASE}/api/alerts`;
@@ -164,6 +188,83 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [enrollStatus, setEnrollStatus] = useState({ loading: false, success: null, error: null });
 
+  // Restricted Zone & Off-Hours Security Rules state
+  const [restrictedRules, setRestrictedRules] = useState(() => {
+    const saved = safelyGetArray('restricted_rules');
+    if (saved.length > 0) return saved;
+    return [
+      {
+        id: 'RULE_PERIMETER_NIGHT',
+        name: 'Night Perimeter & Off-Hours Lock',
+        cameraId: 'CAM_01',
+        startTime: '22:00',
+        endTime: '06:00',
+        constraint: 'PERSON_OR_CAR',
+        enabled: true
+      },
+      {
+        id: 'RULE_UPTOWN_RESTRICTED',
+        name: 'Uptown Restricted Area Watch',
+        cameraId: 'CAM_02',
+        startTime: '20:00',
+        endTime: '07:00',
+        constraint: 'PERSON_OR_CAR',
+        enabled: true
+      }
+    ];
+  });
+
+  const [ruleForm, setRuleForm] = useState({
+    name: '',
+    cameraId: 'CAM_01',
+    startTime: '22:00',
+    endTime: '06:00',
+    constraint: 'PERSON_OR_CAR'
+  });
+  const [ruleStatus, setRuleStatus] = useState({ success: null, error: null });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('restricted_rules', JSON.stringify(restrictedRules));
+    } catch (e) {
+      console.warn("Failed to save restricted rules in localStorage:", e);
+    }
+  }, [restrictedRules]);
+
+  const restrictedRulesRef = useRef(restrictedRules);
+  useEffect(() => {
+    restrictedRulesRef.current = restrictedRules;
+  }, [restrictedRules]);
+
+  const handleAddRule = (e) => {
+    e.preventDefault();
+    if (!ruleForm.name.trim()) {
+      setRuleStatus({ success: null, error: "Please enter a rule designation (e.g. Server Room Off-Hours)." });
+      return;
+    }
+    const newRule = {
+      id: `RULE_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: ruleForm.name.trim(),
+      cameraId: ruleForm.cameraId,
+      startTime: ruleForm.startTime,
+      endTime: ruleForm.endTime,
+      constraint: ruleForm.constraint,
+      enabled: true
+    };
+    const updated = [...restrictedRules, newRule];
+    setRestrictedRules(updated);
+    setRuleStatus({ success: `✅ Rule '${newRule.name}' created successfully!`, error: null });
+    setRuleForm(prev => ({ ...prev, name: '' }));
+  };
+
+  const handleToggleRule = (ruleId) => {
+    setRestrictedRules(prev => prev.map(r => r.id === ruleId ? { ...r, enabled: !r.enabled } : r));
+  };
+
+  const handleDeleteRule = (ruleId) => {
+    setRestrictedRules(prev => prev.filter(r => r.id !== ruleId));
+  };
+
   // Camera stream states
   const [connectedCameras, setConnectedCameras] = useState({});
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -196,7 +297,6 @@ export default function App() {
   });
 
   const [enrolledPlates, setEnrolledPlates] = useState(() => safelyGetArray('watchlist_plates'));
-
 
   const ws = useRef(null);
   const [aiBackendOnline, setAiBackendOnline] = useState(true);
@@ -333,8 +433,6 @@ export default function App() {
     };
   }, []);
 
-
-
   // CCTV Hardware registry using actual laptop location if fetched
   const cameras = [
     {
@@ -360,10 +458,12 @@ export default function App() {
     }
   };
 
-  // HANDLER: Continuous Feed with Strict Detection Filters
+  // HANDLER: Continuous Feed with Detection & Off-Hours Restricted Zone Rules Evaluator
   const handleDetection = (detection) => {
-    // 1. Silent Camera Mode: Block detection alerts if neither a face photo nor a plate is actively enrolled
-    if (enrolledTargets.length === 0 && enrolledPlates.length === 0) {
+    const activeRestrictedRules = restrictedRulesRef.current.filter(r => r.enabled);
+
+    // 1. Silent Camera Mode: Block detection alerts if neither watchlist targets, plates, NOR active restricted rules are present
+    if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0) {
       return;
     }
 
@@ -380,15 +480,43 @@ export default function App() {
       if (!matchedPlate) return;
     }
 
+    // 4. Restricted Zone & Off-Hours Security Rule Evaluator
+    const now = new Date();
+    const activeRulesForCam = activeRestrictedRules.filter(r =>
+      r.cameraId === 'ALL_CAMERAS' || r.cameraId === detection.cameraId
+    );
+
+    let isRestrictedIntrusion = false;
+    let matchingRuleName = '';
+    let matchingTimeWindow = '';
+
+    for (const rule of activeRulesForCam) {
+      if (isTimeInWindow(now, rule.startTime, rule.endTime)) {
+        if (rule.constraint === 'PERSON_ONLY' && detection.eventType === 'PLATE MATCH') continue;
+        if (rule.constraint === 'VEHICLE_ONLY' && detection.eventType === 'TARGET MATCH') continue;
+
+        isRestrictedIntrusion = true;
+        matchingRuleName = rule.name;
+        matchingTimeWindow = `${rule.startTime} - ${rule.endTime}`;
+        break;
+      }
+    }
+
     const currentCam = cameras.find(c => c.id === detection.cameraId) || cameras[0];
 
     const newAlert = {
       id: Date.now() + Math.random().toString(36).substring(2, 7),
       camera_id: currentCam.id,
-      event_type: detection.eventType || (enrolledTargets.length > 0 ? 'TARGET MATCH' : 'PLATE MATCH'),
-      severity: detection.severity || 'CRITICAL',
-      details: detection.details || `Matched Target: ${enrolledTargets[enrolledTargets.length - 1]?.name || enrolledPlates[enrolledPlates.length - 1]}`,
-      subject: detection.subject || enrolledTargets[enrolledTargets.length - 1]?.name || 'UNKNOWN VEHICLE',
+      event_type: isRestrictedIntrusion
+        ? 'RESTRICTED INTRUSION'
+        : (detection.eventType || (enrolledTargets.length > 0 ? 'TARGET MATCH' : 'PLATE MATCH')),
+      severity: 'CRITICAL',
+      details: isRestrictedIntrusion
+        ? `🚨 Off-Hours Restricted Intrusion: Rule '${matchingRuleName}' (${matchingTimeWindow}) triggered at ${currentCam.id}`
+        : (detection.details || `Matched Target: ${enrolledTargets[enrolledTargets.length - 1]?.name || enrolledPlates[enrolledPlates.length - 1]}`),
+      subject: isRestrictedIntrusion
+        ? `UNAUTHORIZED PRESENCE (${detection.subject || 'SUSPECT'})`
+        : (detection.subject || enrolledTargets[enrolledTargets.length - 1]?.name || 'UNKNOWN VEHICLE'),
       lat: currentCam.lat,
       lng: currentCam.lng,
       address: currentCam.address,
@@ -729,6 +857,136 @@ export default function App() {
                 {enrollStatus.error}
               </div>
             )}
+          </section>
+
+          {/* Restricted Zone & Off-Hours Rules Card */}
+          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5">
+            <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2 mb-4">
+              <AlertOctagon className="w-4 h-4 text-rose-500" />
+              Restricted Zone & Off-Hours Rules
+            </h2>
+            <form onSubmit={handleAddRule} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Rule Designation</label>
+                <input
+                  type="text"
+                  value={ruleForm.name}
+                  onChange={(e) => setRuleForm(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="e.g. Server Room Off-Hours Guard"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Camera Location</label>
+                  <select
+                    value={ruleForm.cameraId}
+                    onChange={(e) => setRuleForm(prev => ({ ...prev, cameraId: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
+                  >
+                    <option value="CAM_01">CAM_01 (LOCAL_NODE)</option>
+                    <option value="CAM_02">CAM_02 (UPTOWN_NODE)</option>
+                    <option value="ALL_CAMERAS">ALL SURVEILLANCE NODES</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Constraint</label>
+                  <select
+                    value={ruleForm.constraint}
+                    onChange={(e) => setRuleForm(prev => ({ ...prev, constraint: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
+                  >
+                    <option value="PERSON_OR_CAR">ANY PERSON OR CAR</option>
+                    <option value="PERSON_ONLY">PERSON ONLY</option>
+                    <option value="VEHICLE_ONLY">VEHICLE ONLY</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Start Time</label>
+                  <input
+                    type="time"
+                    value={ruleForm.startTime}
+                    onChange={(e) => setRuleForm(prev => ({ ...prev, startTime: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-rose-300 font-mono focus:border-rose-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">End Time</label>
+                  <input
+                    type="time"
+                    value={ruleForm.endTime}
+                    onChange={(e) => setRuleForm(prev => ({ ...prev, endTime: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-rose-300 font-mono focus:border-rose-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-1.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg text-xs font-semibold transition-all mt-1 flex items-center justify-center gap-1.5"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                Create Off-Hours Security Rule
+              </button>
+            </form>
+
+            {ruleStatus.success && (
+              <div className="mt-2 text-[11px] p-2 bg-emerald-950/20 border border-emerald-800/30 text-emerald-400 rounded-lg">
+                {ruleStatus.success}
+              </div>
+            )}
+            {ruleStatus.error && (
+              <div className="mt-2 text-[11px] p-2 bg-rose-950/20 border border-rose-800/30 text-rose-400 rounded-lg">
+                {ruleStatus.error}
+              </div>
+            )}
+
+            {/* Active Rules List */}
+            <div className="mt-4 pt-3 border-t border-slate-800 space-y-2">
+              <div className="text-[11px] font-semibold text-slate-400 uppercase flex justify-between items-center">
+                <span>Active Intrusion Rules</span>
+                <span className="text-rose-400 font-mono font-bold">{restrictedRules.filter(r => r.enabled).length} ACTIVE</span>
+              </div>
+
+              {restrictedRules.map((rule) => {
+                const isCurrentlyInWindow = isTimeInWindow(new Date(), rule.startTime, rule.endTime);
+                return (
+                  <div key={rule.id} className={`p-2.5 rounded-lg border text-xs font-mono flex flex-col gap-1 transition-all ${rule.enabled ? (isCurrentlyInWindow ? 'bg-rose-950/30 border-rose-800/80 text-rose-200' : 'bg-slate-950 border-slate-800 text-slate-300') : 'bg-slate-950/40 border-slate-900 text-slate-500'}`}>
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold font-sans text-slate-200 flex items-center gap-1.5">
+                        <span className={`w-2 h-2 rounded-full ${rule.enabled ? (isCurrentlyInWindow ? 'bg-rose-500 animate-ping' : 'bg-amber-400') : 'bg-slate-600'}`}></span>
+                        {rule.name}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleToggleRule(rule.id)}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${rule.enabled ? 'bg-emerald-950 border border-emerald-800 text-emerald-400' : 'bg-slate-900 text-slate-500'}`}
+                        >
+                          {rule.enabled ? 'ENABLED' : 'PAUSED'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteRule(rule.id)}
+                          className="text-slate-500 hover:text-rose-400 text-[11px] px-1"
+                          title="Delete Rule"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+                      <span>📍 {rule.cameraId}</span>
+                      <span className="text-amber-300 font-bold">⏰ {rule.startTime} - {rule.endTime}</span>
+                      <span>{rule.constraint}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </section>
 
           {/* Leaflet Spatio-Temporal Map */}
