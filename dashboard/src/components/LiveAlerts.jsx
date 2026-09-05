@@ -50,6 +50,16 @@ export default function LiveAlerts({ alerts = [] }) {
                 </div>
               )}
 
+              {/* Recorded Video Clip Playback */}
+              {alert.videoUrl && (
+                <div style={{ marginTop: '0.5rem', borderRadius: '0.5rem', overflow: 'hidden', border: '1px solid #334155' }}>
+                  <div style={{ fontSize: '0.7rem', color: '#38bdf8', padding: '0.25rem 0.5rem', background: '#0f172a', fontWeight: 'bold' }}>
+                    🎥 RECORDED EVIDENCE CLIP
+                  </div>
+                  <video src={alert.videoUrl} controls autoPlay muted loop style={{ width: '100%', maxHeight: '160px', objectFit: 'cover' }} />
+                </div>
+              )}
+
               {alert.extra_info && (
                 <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '0.25rem' }}>
                   Info: {alert.extra_info}

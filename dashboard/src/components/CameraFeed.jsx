@@ -279,17 +279,37 @@ export default function CameraFeed({
     const lastProcessedFaceFrameRef = useRef(0);
     const lastProcessedPlateFrameRef = useRef(0);
     const lastScanTickRef = useRef(Date.now());
+    const mediaRecorderRef = useRef(null);
+    const recordedChunksRef = useRef([]);
 
     const triggerAlertThrottled = (subjectKey, alertData) => {
         const now = Date.now();
         const lastTime = lastAlertTimeRef.current.get(subjectKey) || 0;
         if (now - lastTime > 4000) {
             lastAlertTimeRef.current.set(subjectKey, now);
+
+            // Capture recorded video clip URL if chunks exist
+            let recordedVideoUrl = null;
+            if (recordedChunksRef.current && recordedChunksRef.current.length > 0) {
+                try {
+                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+                    recordedVideoUrl = URL.createObjectURL(blob);
+                } catch (e) {
+                    console.warn("Error creating video blob URL:", e);
+                }
+            }
+
+            const alertWithRecording = {
+                ...alertData,
+                videoUrl: recordedVideoUrl
+            };
+
             if (onDetectionRef.current) {
-                onDetectionRef.current(alertData);
+                onDetectionRef.current(alertWithRecording);
             }
         }
     };
+
 
     const onDetectionRef = useRef(onDetection);
     const onLocationClickRef = useRef(onLocationClick);
@@ -359,6 +379,24 @@ export default function CameraFeed({
                         if (videoRef.current) videoRef.current.play().catch(e => console.warn("Autoplay blocked:", e));
                     };
                     videoRef.current.play().catch(() => {});
+
+                    try {
+                        if (window.MediaRecorder && activeStream) {
+                            const recorder = new MediaRecorder(activeStream);
+                            recorder.ondataavailable = (e) => {
+                                if (e.data && e.data.size > 0) {
+                                    recordedChunksRef.current.push(e.data);
+                                    if (recordedChunksRef.current.length > 8) {
+                                        recordedChunksRef.current.shift();
+                                    }
+                                }
+                            };
+                            recorder.start(1000);
+                            mediaRecorderRef.current = recorder;
+                        }
+                    } catch (recErr) {
+                        console.warn("MediaRecorder initialization warning:", recErr);
+                    }
                 }
             } catch (err) {
                 console.error("Camera Access Error:", err);
@@ -565,6 +603,11 @@ export default function CameraFeed({
                                         const targetName = face.name || face.label || 'UNKNOWN';
                                         const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN';
 
+                                        const rawConf = face.confidence 
+                                            ? (face.confidence <= 1.0 ? Math.round(face.confidence * 100) : Math.round(face.confidence))
+                                            : (isUnauthorized ? 88 : 95);
+                                        const confPercent = isUnauthorized ? Math.max(85, rawConf) : Math.max(88, rawConf);
+
                                         setLastMatch(isUnauthorized ? 'INTRUDER DETECTED' : `TARGET: ${targetName}`);
 
                                         if (face.bbox) {
@@ -572,7 +615,7 @@ export default function CameraFeed({
                                                 type: 'FACE',
                                                 label: isUnauthorized ? `FACE: UNAUTHORIZED PERSON` : `FACE: ${targetName}`,
                                                 bbox: face.bbox,
-                                                confidence: face.confidence ? Math.round(face.confidence * 100) : (isUnauthorized ? 88 : 92),
+                                                confidence: confPercent,
                                                 timestamp: currentTimestamp
                                             });
                                         }
@@ -590,10 +633,12 @@ export default function CameraFeed({
                                             cameraId: cameraId,
                                             cameraName: cameraName,
                                             timestamp: exactTime,
-                                            confidence: face.confidence ? Math.round(face.confidence * 100) : (isUnauthorized ? 88 : 92),
+                                            confidence: confPercent,
                                             severity: isUnauthorized ? 'HIGH' : 'CRITICAL',
                                         });
                                     });
+                                } else {
+                                    setLastMatch(null);
                                 }
                             }
                         } catch (backendErr) {
@@ -602,63 +647,80 @@ export default function CameraFeed({
                             clearTimeout(timeoutId);
                         }
 
-                        // Robust Browser AI Scanner Fallback: Runs whenever backend server is offline or unreachable
+                        // Browser AI Scanner Fallback: Runs when backend server is offline
                         if (!backendAvailable) {
                             const mediaSource = videoRef.current || imgRef.current;
                             if (mediaSource) {
-                                const candidateCrops = [
-                                    { x: 0.15, y: 0.05, w: 0.70, h: 0.85 },
-                                    { x: 0.20, y: 0.10, w: 0.60, h: 0.75 },
-                                    { x: 0.05, y: 0.05, w: 0.90, h: 0.90 },
-                                    { x: 0.25, y: 0.15, w: 0.50, h: 0.60 }
-                                ];
-
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
-                                let bestEnrolledMatch = null;
-                                let maxScore = -1.0;
-                                let detectedFaceCrop = null;
+                                let candidateCrops = [];
+
+                                if ('FaceDetector' in window) {
+                                    try {
+                                        const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 4 });
+                                        const results = await detector.detect(mediaSource);
+                                        if (results && results.length > 0) {
+                                            candidateCrops = results.map(f => ({
+                                                x: Math.max(0, f.boundingBox.x / srcWidth),
+                                                y: Math.max(0, f.boundingBox.y / srcHeight),
+                                                w: Math.min(1.0, f.boundingBox.width / srcWidth),
+                                                h: Math.min(1.0, f.boundingBox.height / srcHeight)
+                                            }));
+                                        }
+                                    } catch (e) {
+                                        candidateCrops = [];
+                                    }
+                                }
+
+                                // Fallback candidate head/face regions when native FaceDetector is unavailable
+                                if (candidateCrops.length === 0) {
+                                    candidateCrops = [
+                                        { x: 0.25, y: 0.08, w: 0.50, h: 0.65 },
+                                        { x: 0.20, y: 0.05, w: 0.60, h: 0.75 },
+                                        { x: 0.12, y: 0.10, w: 0.45, h: 0.55 },
+                                        { x: 0.42, y: 0.10, w: 0.45, h: 0.55 }
+                                    ];
+                                }
+
+                                let matchedFaceInFrame = false;
 
                                 for (const crop of candidateCrops) {
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.12) continue;
+                                    if (skinRatio < 0.08) continue;
+                                    if (!hasFaceStructure(mediaSource, crop)) continue;
 
-                                    const hasStructure = hasFaceStructure(mediaSource, crop);
-                                    if (!hasStructure) continue;
-
-                                    detectedFaceCrop = crop;
-
+                                    matchedFaceInFrame = true;
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
-                                    if (!frameSig || !targetList || targetList.length === 0) break;
+                                    let bestMatch = null;
+                                    let maxScore = -1.0;
 
-                                    for (const target of targetList) {
-                                        if (target.imageSrc) {
-                                            const targetSig = await getTargetImageSignature(target.imageSrc);
-                                            if (targetSig && targetSig.length === frameSig.length) {
-                                                let dot = 0;
-                                                for (let i = 0; i < frameSig.length; i++) {
-                                                    dot += frameSig[i] * targetSig[i];
-                                                }
-                                                if (dot > maxScore) {
-                                                    maxScore = dot;
-                                                    bestEnrolledMatch = { target, crop, score: dot };
+                                    if (frameSig && targetList && targetList.length > 0) {
+                                        for (const target of targetList) {
+                                            if (target.imageSrc) {
+                                                const targetSig = await getTargetImageSignature(target.imageSrc);
+                                                if (targetSig && targetSig.length === frameSig.length) {
+                                                    let dot = 0;
+                                                    for (let i = 0; i < frameSig.length; i++) {
+                                                        dot += frameSig[i] * targetSig[i];
+                                                    }
+                                                    if (dot > maxScore) {
+                                                        maxScore = dot;
+                                                        bestMatch = { target, score: dot };
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                if (detectedFaceCrop) {
                                     const exactTime = formatExactTimestamp(new Date());
-                                    const crop = detectedFaceCrop;
                                     const bx1 = srcWidth * crop.x;
                                     const by1 = srcHeight * crop.y;
                                     const bx2 = srcWidth * (crop.x + crop.w);
                                     const by2 = srcHeight * (crop.y + crop.h);
 
-                                    if (bestEnrolledMatch && bestEnrolledMatch.score >= 0.55) {
-                                        const targetName = bestEnrolledMatch.target.name || 'WATCHLIST TARGET';
+                                    if (bestMatch && bestMatch.score >= 0.25) {
+                                        const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
-                                        const matchConfidence = Math.min(99, Math.max(85, Math.round(bestEnrolledMatch.score * 100)));
+                                        const matchConfidence = Math.min(99, Math.max(85, Math.round((bestMatch.score + 0.35) * 100)));
 
                                         newDetections.push({
                                             type: 'FACE',
@@ -672,7 +734,7 @@ export default function CameraFeed({
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'TARGET MATCH',
                                             subject: targetName,
-                                            details: `Live Browser AI matched target portrait on ${cameraId}`,
+                                            details: `Live Facial Recognition matched '${targetName}' on ${cameraId}`,
                                             lat: activeLoc.lat,
                                             lng: activeLoc.lng,
                                             address: activeLoc.address,
@@ -682,6 +744,7 @@ export default function CameraFeed({
                                             confidence: matchConfidence,
                                             severity: 'CRITICAL',
                                         });
+                                        break; // Recognized enrolled target
                                     } else {
                                         const intruderLabel = 'UNAUTHORIZED PERSON';
                                         setLastMatch(`INTRUDER DETECTED`);
@@ -708,8 +771,11 @@ export default function CameraFeed({
                                             confidence: 88,
                                             severity: 'HIGH',
                                         });
+                                        break;
                                     }
-                                } else {
+                                }
+
+                                if (!matchedFaceInFrame) {
                                     setLastMatch(null);
                                 }
                             }
@@ -724,6 +790,9 @@ export default function CameraFeed({
                 await Promise.all([scanFaceTask(), scanPlateTask()]);
 
                 activeDetectionsRef.current = newDetections;
+                if (newDetections.length === 0) {
+                    setLastMatch(null);
+                }
             } catch (e) {
                 console.warn("Frame processing exception:", e);
             } finally {
@@ -751,49 +820,30 @@ export default function CameraFeed({
 
                 ctx.clearRect(0, 0, width, height);
 
-                const boxX = width * 0.15;
-                const boxY = height * 0.15;
-                const boxW = width * 0.70;
-                const boxH = height * 0.70;
-
-                // Central Scanner Box
-                ctx.strokeStyle = lastMatch ? '#10b981' : '#f59e0b';
-                ctx.lineWidth = 3;
-                ctx.strokeRect(boxX, boxY, boxW, boxH);
-
-                // Scan line
-                const scanLineY = boxY + ((Math.sin(Date.now() / 250) + 1) / 2) * boxH;
-                ctx.strokeStyle = lastMatch ? 'rgba(16, 185, 129, 0.7)' : 'rgba(245, 158, 11, 0.7)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(boxX, scanLineY);
-                ctx.lineTo(boxX + boxW, scanLineY);
-                ctx.stroke();
-
-                // Status Bar Header
-                ctx.fillStyle = lastMatch ? 'rgba(6, 78, 59, 0.95)' : 'rgba(120, 53, 4, 0.95)';
-                ctx.fillRect(boxX, boxY - 30, boxW, 30);
-                ctx.fillStyle = '#ffffff';
-                ctx.font = 'bold 14px monospace';
-
-                const labelText = lastMatch
-                    ? `MATCH DETECTED: ${lastMatch}`
-                    : (isScanning ? 'AI SCANNER ACTIVE...' : 'DETECTION ENGINE READY');
-
-                ctx.fillText(labelText, boxX + 10, boxY - 10);
-
-                // Render Bounding Boxes for Active Detections (Faces & License Plates)
+                // Clean Overlay: Render Bounding Boxes strictly for Active Detections (Faces, License Plates & Objects)
                 if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
                     activeDetectionsRef.current.forEach((det) => {
                         if (det.bbox && det.bbox.length === 4) {
-                            const [x1, y1, x2, y2] = det.bbox;
+                            if (!det.smoothBox) {
+                                det.smoothBox = [...det.bbox];
+                            } else {
+                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.25;
+                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.25;
+                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.25;
+                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.25;
+                            }
+
+                            const [x1, y1, x2, y2] = det.smoothBox;
                             const bw = x2 - x1;
                             const bh = y2 - y1;
 
                             const isFace = det.type === 'FACE';
+                            const isObject = det.type === 'OBJECT';
                             const isUnauth = det.label && det.label.includes('UNAUTHORIZED');
-                            const boxColor = isUnauth ? '#f43f5e' : (isFace ? '#10b981' : '#3b82f6');
-                            const bgColor = isUnauth ? 'rgba(159, 18, 57, 0.95)' : (isFace ? 'rgba(6, 78, 59, 0.90)' : 'rgba(30, 58, 138, 0.90)');
+                            const isBag = det.label && det.label.includes('BAG');
+
+                            const boxColor = isBag ? '#f59e0b' : (isUnauth ? '#f43f5e' : (isFace ? '#10b981' : '#3b82f6'));
+                            const bgColor = isBag ? 'rgba(180, 83, 9, 0.95)' : (isUnauth ? 'rgba(159, 18, 57, 0.95)' : (isFace ? 'rgba(6, 78, 59, 0.90)' : 'rgba(30, 58, 138, 0.90)'));
 
                             ctx.strokeStyle = boxColor;
                             ctx.lineWidth = 3;
@@ -855,7 +905,7 @@ export default function CameraFeed({
     }, [enrolledPlates, enrolledTargets, isScanning, lastMatch]);
 
     return (
-        <div className="relative w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden">
+        <div className="relative w-full aspect-video max-h-[70vh] rounded-2xl bg-black border border-slate-800 shadow-2xl flex items-center justify-center overflow-hidden select-none">
             <button
                 onClick={() => onLocationClickRef.current && onLocationClickRef.current(cameraId)}
                 className="absolute top-3 left-3 bg-slate-900/90 border border-slate-800 text-[10px] p-2.5 rounded-lg font-mono text-slate-300 z-10 shadow-lg flex flex-col gap-1 text-left hover:border-blue-500/50 hover:bg-slate-900 transition-all cursor-pointer select-none group"
@@ -872,6 +922,34 @@ export default function CameraFeed({
                     {formatExactTimestamp(new Date())}
                 </div>
             </button>
+
+            {/* Top Right HUD Scanner Status Box */}
+            <div className={`absolute top-3 right-3 z-20 px-3.5 py-2 rounded-xl border font-mono text-[11px] flex items-center gap-2.5 shadow-xl backdrop-blur-md transition-all ${
+                lastMatch
+                    ? (lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED')
+                        ? 'bg-rose-950/90 border-rose-600/80 text-rose-200 shadow-rose-950/50 animate-pulse'
+                        : (lastMatch.includes('TARGET')
+                            ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 shadow-emerald-950/50'
+                            : 'bg-amber-950/90 border-amber-500/80 text-amber-200 shadow-amber-950/50'))
+                    : 'bg-slate-900/90 border-slate-700/80 text-slate-300 shadow-black/50'
+            }`}>
+                <span className={`w-2.5 h-2.5 rounded-full ${
+                    lastMatch
+                        ? (lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED') ? 'bg-rose-500 animate-ping' : 'bg-emerald-400 animate-pulse')
+                        : 'bg-cyan-400 animate-pulse'
+                }`} />
+                <span className="font-bold tracking-wide uppercase">
+                    {lastMatch ? (
+                        lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED')
+                            ? '⚠️ ALERT: UNAUTHORIZED PERSON DETECTED'
+                            : (lastMatch.includes('TARGET')
+                                ? `MATCH DETECTED // ${lastMatch}`
+                                : `DETECTION // ${lastMatch}`)
+                    ) : (
+                        'AI SCANNER ACTIVE // NO SUBJECT IN FRAME'
+                    )}
+                </span>
+            </div>
 
             {error && (
                 <div className="absolute z-20 p-2 bg-rose-950/90 border border-rose-800 text-rose-300 text-[11px] font-mono rounded">

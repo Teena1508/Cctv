@@ -169,6 +169,7 @@ const safelyGetArray = (key) => {
 };
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState('FEEDS'); // 'FEEDS' | 'MAP' | 'RULES_WATCHLIST' | 'RECORDINGS'
   const [engineMode, setEngineMode] = useState('CLIENT-SIDE');
   const [alerts, setAlerts] = useState([]);
   const [localAlerts, setLocalAlerts] = useState(() => safelyGetArray('watchlist_alerts'));
@@ -779,229 +780,165 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 h-[calc(100vh-80px)] overflow-hidden">
-        {/* Left Panel */}
-        <div className="lg:col-span-4 flex flex-col gap-6 overflow-y-auto pr-2">
-          {/* Combined Watchlist Enrollment */}
-          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5">
-            <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2 mb-4">
-              <UserPlus className="w-4 h-4 text-blue-400" />
-              Watchlist Enrollment (Face & ANPR)
-            </h2>
-            <form onSubmit={handleEnrollSubmit} className="space-y-4">
-              {/* Face Target Inputs */}
-              <div className="space-y-2">
-                <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">Target Facial Recognition</label>
-                <input
-                  type="text"
-                  value={enrollForm.name}
-                  onChange={(e) => setEnrollForm(prev => ({ ...prev, name: e.target.value }))}
-                  placeholder="Subject Full Name"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-blue-500 outline-none"
-                />
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setSelectedFile(e.target.files[0])}
-                  className="text-xs text-slate-400 block w-full"
+      {/* Primary SOC Navigation Bar */}
+      <nav className="border-b border-slate-900 bg-slate-950/80 px-6 py-2 flex items-center justify-between sticky top-[65px] z-40">
+        <div className="flex gap-2 font-mono text-xs font-bold">
+          <button
+            onClick={() => setActiveTab('FEEDS')}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-all cursor-pointer ${activeTab === 'FEEDS' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'}`}
+          >
+            <Radio className="w-4 h-4" />
+            📹 LIVE CAMERAS
+          </button>
+          <button
+            onClick={() => setActiveTab('MAP')}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-all cursor-pointer ${activeTab === 'MAP' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'}`}
+          >
+            <Layers className="w-4 h-4" />
+            🗺️ LIVE MAP
+          </button>
+          <button
+            onClick={() => setActiveTab('RULES_WATCHLIST')}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-all cursor-pointer ${activeTab === 'RULES_WATCHLIST' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'}`}
+          >
+            <UserPlus className="w-4 h-4" />
+            📋 WATCHLIST & RULES
+          </button>
+          <button
+            onClick={() => setActiveTab('RECORDINGS')}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-all cursor-pointer ${activeTab === 'RECORDINGS' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'}`}
+          >
+            <Bell className="w-4 h-4" />
+            🎥 ALERTS & RECORDINGS ({activeAlerts.length})
+          </button>
+        </div>
+
+        <div className="text-xs font-mono text-slate-500 hidden md:block">
+          STATUS: <span className="text-emerald-400 font-bold">OPERATIONAL</span>
+        </div>
+      </nav>
+
+      {/* Main Container */}
+      <div className="flex-1 p-6 overflow-y-auto min-h-[calc(100vh-130px)]">
+        {/* TAB 1: LIVE CAMERAS VIEW */}
+        {activeTab === 'FEEDS' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full">
+            {/* Center Main Feed - Big Fixed Landscape */}
+            <div className="lg:col-span-8 flex flex-col gap-4">
+              <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
+                <Radio className="w-4 h-4 text-blue-400" />
+                Primary Camera Feed (Fixed Widescreen 16:9 Landscape)
+              </h2>
+              <div className="bg-slate-950 border border-slate-900 rounded-2xl overflow-hidden p-2 flex flex-col items-center justify-center">
+                <CameraFeed
+                  cameraId="CAM_01"
+                  cameraName="LOCAL_LAPTOP_NODE"
+                  latitude={laptopLocation ? laptopLocation[0] : CURRENT_NODE_LOCATION.lat}
+                  longitude={laptopLocation ? laptopLocation[1] : CURRENT_NODE_LOCATION.lng}
+                  enrolledTargets={enrolledTargets}
+                  enrolledPlates={enrolledPlates}
+                  onDetection={handleDetection}
+                  onLocationClick={() => setActiveTab('MAP')}
                 />
               </div>
 
-              <div className="border-t border-slate-800/80 my-2"></div>
-
-              {/* Number Plate Target Input */}
-              <div className="space-y-2">
-                <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <Car className="w-3.5 h-3.5 text-amber-400" />
-                  Target License Plate (ANPR)
-                </label>
-                <input
-                  type="text"
-                  value={enrollForm.targetPlate}
-                  onChange={(e) => setEnrollForm(prev => ({ ...prev, targetPlate: e.target.value }))}
-                  placeholder="e.g. 7XYZ123 or DL01AB1234"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-amber-300 uppercase tracking-widest focus:border-amber-500 outline-none placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-600"
-                />
-              </div>
-
-              <div className="flex gap-2 mt-2">
-                <button
-                  type="submit"
-                  className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-all"
-                >
-                  Enroll Target to Watchlist
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSnapWebcamFace}
-                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1"
-                  title="Capture face directly from live camera feed"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  Snap My Face
-                </button>
-              </div>
-            </form>
-
-            <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between text-xs text-slate-400 font-mono">
-              <div>Enrolled Faces: <span className="text-cyan-400 font-bold">{enrolledTargets.length}</span></div>
-              <div>Target Plates: <span className="text-amber-400 font-bold">{enrolledPlates.length}</span></div>
+              {engineMode === 'FOG-CLUSTER' && connectedCameras['Camera Slot 2'] && (
+                <div className="bg-slate-950 border border-slate-900 rounded-2xl overflow-hidden p-2 flex flex-col items-center justify-center mt-2">
+                  <CameraFeed
+                    cameraId={connectedCameras['Camera Slot 2'].cameraId}
+                    cameraName="UPTOWN_NODE"
+                    latitude={laptopLocation ? laptopLocation[0] + 0.005 : CURRENT_NODE_LOCATION.lat + 0.005}
+                    longitude={laptopLocation ? laptopLocation[1] + 0.005 : CURRENT_NODE_LOCATION.lng + 0.005}
+                    streamUrl={`http://localhost:8000/video_feed_slot/${encodeURIComponent('Camera Slot 2')}`}
+                    enrolledTargets={enrolledTargets}
+                    enrolledPlates={enrolledPlates}
+                    onDetection={handleDetection}
+                    onLocationClick={() => setActiveTab('MAP')}
+                  />
+                </div>
+              )}
             </div>
 
-            {enrollStatus.success && (
-              <div className="mt-3 text-xs p-2 bg-emerald-950/20 border border-emerald-800/30 text-emerald-400 rounded-lg">
-                {enrollStatus.success}
-              </div>
-            )}
-            {enrollStatus.error && (
-              <div className="mt-3 text-xs p-2 bg-rose-950/20 border border-rose-800/30 text-rose-400 rounded-lg">
-                {enrollStatus.error}
-              </div>
-            )}
-          </section>
-
-          {/* Restricted Zone & Off-Hours Rules Card */}
-          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5">
-            <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2 mb-4">
-              <AlertOctagon className="w-4 h-4 text-rose-500" />
-              Restricted Zone & Off-Hours Rules
-            </h2>
-            <form onSubmit={handleAddRule} className="space-y-3">
-              <div>
-                <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Rule Designation</label>
-                <input
-                  type="text"
-                  value={ruleForm.name}
-                  onChange={(e) => setRuleForm(prev => ({ ...prev, name: e.target.value }))}
-                  placeholder="e.g. Server Room Off-Hours Guard"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
-                />
+            {/* Quick Live Alerts Feed */}
+            <div className="lg:col-span-4 flex flex-col gap-4">
+              <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
+                  <Bell className="w-4 h-4 text-blue-400" />
+                  Live Detection Alerts
+                </h2>
+                <button
+                  onClick={() => setActiveTab('RECORDINGS')}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 font-bold uppercase tracking-wider cursor-pointer"
+                >
+                  View All & Recordings →
+                </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Camera Location</label>
-                  <select
-                    value={ruleForm.cameraId}
-                    onChange={(e) => setRuleForm(prev => ({ ...prev, cameraId: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
-                  >
-                    <option value="CAM_01">CAM_01 (LOCAL_NODE)</option>
-                    <option value="CAM_02">CAM_02 (UPTOWN_NODE)</option>
-                    <option value="ALL_CAMERAS">ALL SURVEILLANCE NODES</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Constraint</label>
-                  <select
-                    value={ruleForm.constraint}
-                    onChange={(e) => setRuleForm(prev => ({ ...prev, constraint: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:border-rose-500 outline-none"
-                  >
-                    <option value="PERSON_OR_CAR">ANY PERSON OR CAR</option>
-                    <option value="PERSON_ONLY">PERSON ONLY</option>
-                    <option value="VEHICLE_ONLY">VEHICLE ONLY</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Start Time</label>
-                  <input
-                    type="time"
-                    value={ruleForm.startTime}
-                    onChange={(e) => setRuleForm(prev => ({ ...prev, startTime: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-rose-300 font-mono focus:border-rose-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">End Time</label>
-                  <input
-                    type="time"
-                    value={ruleForm.endTime}
-                    onChange={(e) => setRuleForm(prev => ({ ...prev, endTime: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-rose-300 font-mono focus:border-rose-500 outline-none"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-1.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg text-xs font-semibold transition-all mt-1 flex items-center justify-center gap-1.5"
-              >
-                <Clock className="w-3.5 h-3.5" />
-                Create Off-Hours Security Rule
-              </button>
-            </form>
-
-            {ruleStatus.success && (
-              <div className="mt-2 text-[11px] p-2 bg-emerald-950/20 border border-emerald-800/30 text-emerald-400 rounded-lg">
-                {ruleStatus.success}
-              </div>
-            )}
-            {ruleStatus.error && (
-              <div className="mt-2 text-[11px] p-2 bg-rose-950/20 border border-rose-800/30 text-rose-400 rounded-lg">
-                {ruleStatus.error}
-              </div>
-            )}
-
-            {/* Active Rules List */}
-            <div className="mt-4 pt-3 border-t border-slate-800 space-y-2">
-              <div className="text-[11px] font-semibold text-slate-400 uppercase flex justify-between items-center">
-                <span>Active Intrusion Rules</span>
-                <span className="text-rose-400 font-mono font-bold">{restrictedRules.filter(r => r.enabled).length} ACTIVE</span>
-              </div>
-
-              {restrictedRules.map((rule) => {
-                const isCurrentlyInWindow = isTimeInWindow(new Date(), rule.startTime, rule.endTime);
-                return (
-                  <div key={rule.id} className={`p-2.5 rounded-lg border text-xs font-mono flex flex-col gap-1 transition-all ${rule.enabled ? (isCurrentlyInWindow ? 'bg-rose-950/30 border-rose-800/80 text-rose-200' : 'bg-slate-950 border-slate-800 text-slate-300') : 'bg-slate-950/40 border-slate-900 text-slate-500'}`}>
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold font-sans text-slate-200 flex items-center gap-1.5">
-                        <span className={`w-2 h-2 rounded-full ${rule.enabled ? (isCurrentlyInWindow ? 'bg-rose-500 animate-ping' : 'bg-amber-400') : 'bg-slate-600'}`}></span>
-                        {rule.name}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => handleToggleRule(rule.id)}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${rule.enabled ? 'bg-emerald-950 border border-emerald-800 text-emerald-400' : 'bg-slate-900 text-slate-500'}`}
-                        >
-                          {rule.enabled ? 'ENABLED' : 'PAUSED'}
-                        </button>
-                        <button
-                          onClick={() => handleDeleteRule(rule.id)}
-                          className="text-slate-500 hover:text-rose-400 text-[11px] px-1"
-                          title="Delete Rule"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                    <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
-                      <span>📍 {rule.cameraId}</span>
-                      <span className="text-amber-300 font-bold">⏰ {rule.startTime} - {rule.endTime}</span>
-                      <span>{rule.constraint}</span>
-                    </div>
+              <div className="space-y-3 overflow-y-auto max-h-[75vh] pr-1">
+                {activeAlerts.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-48 border border-dashed border-slate-800 rounded-xl text-slate-500 text-sm gap-2">
+                    <AlertOctagon className="w-8 h-8 text-slate-600" />
+                    No targets matched in active feeds.
                   </div>
-                );
-              })}
-            </div>
-          </section>
+                ) : (
+                  activeAlerts.slice(0, 6).map((alert) => (
+                    <div
+                      key={alert.id}
+                      className={`p-3.5 rounded-xl border transition-all text-xs space-y-2 hover:bg-slate-900/90 ${alert.severity === 'CRITICAL' ? 'bg-rose-950/20 border-rose-900/50' : 'bg-slate-900/60 border-slate-800/80'}`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="font-mono font-bold tracking-wider flex items-center gap-1.5 text-slate-200">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                          {alert.event_type}
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800/50">
+                          {alert.severity}
+                        </span>
+                      </div>
+                      <div className="text-slate-300 font-semibold text-sm">
+                        {alert.subject || alert.details}
+                      </div>
 
-          {/* Leaflet Spatio-Temporal Map */}
-          <section className="bg-slate-900/30 border border-slate-900 rounded-xl p-5 flex-1 min-h-[380px] flex flex-col gap-3">
-            <h2 className="text-sm font-semibold text-slate-400 uppercase flex items-center gap-2">
-              <Layers className="w-4 h-4 text-blue-400" />
-              Spatio-Temporal GIS Map
-            </h2>
-            <div className="flex-1 w-full bg-slate-950 rounded-lg relative border border-slate-800 overflow-hidden min-h-[300px]">
+                      {/* Video Evidence Clip Preview */}
+                      {alert.videoUrl && (
+                        <div className="mt-2 rounded-lg overflow-hidden border border-slate-800">
+                          <div className="text-[10px] font-mono text-cyan-400 bg-slate-950 px-2 py-1 flex items-center gap-1">
+                            🎥 RECORDED EVIDENCE CLIP
+                          </div>
+                          <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-36 object-cover" />
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: LIVE MAP VIEW */}
+        {activeTab === 'MAP' && (
+          <div className="flex flex-col gap-4 h-[calc(100vh-160px)]">
+            <div className="flex justify-between items-center">
+              <h2 className="text-sm font-semibold text-slate-400 uppercase flex items-center gap-2">
+                <Layers className="w-4 h-4 text-blue-400" />
+                Live Overwatch Tactical GIS Map
+              </h2>
+              <button
+                onClick={triggerGpsSync}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold font-mono flex items-center gap-1.5 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Sync Live Laptop GPS
+              </button>
+            </div>
+
+            <div className="flex-1 w-full bg-slate-950 rounded-2xl relative border border-slate-800 overflow-hidden min-h-[500px]">
               <MapContainer
                 center={mapCenter}
                 zoom={14}
                 scrollWheelZoom={true}
-                className="w-full h-full min-h-[300px] z-0"
+                className="w-full h-full min-h-[500px] z-0"
               >
                 <TileLayer
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -1009,7 +946,6 @@ export default function App() {
                 />
                 <RecenterMap coords={mapCenter} />
 
-                {/* Plot Real Laptop GPS location if acquired (draggable to refine) */}
                 {laptopLocation && (
                   <Marker
                     position={laptopLocation}
@@ -1036,7 +972,6 @@ export default function App() {
                   </Marker>
                 )}
 
-                {/* Plot installed CCTV hardware pins */}
                 {cameras.map((cam) => (
                   <Marker key={cam.id} position={[cam.lat, cam.lng]} icon={cameraIcon}>
                     <Popup>
@@ -1049,7 +984,6 @@ export default function App() {
                   </Marker>
                 ))}
 
-                {/* Plot active alerts */}
                 {activeAlerts.map((alert, idx) => {
                   if (!alert.lat || !alert.lng) return null;
                   return (
@@ -1075,18 +1009,16 @@ export default function App() {
                 })}
               </MapContainer>
 
-              {/* Map Info Overlay Card */}
-              <div className="absolute top-3 right-3 bg-slate-950/90 border border-slate-800 p-3 rounded-lg z-[1000] w-64 text-xs font-mono backdrop-blur-md shadow-2xl">
-                <div className="font-bold text-cyan-400 border-b border-slate-800 pb-1.5 mb-1.5 flex items-center justify-between">
-                  <span>🛰️ TACTICAL GPS</span>
-                  <span className={`w-2 h-2 rounded-full ${locationSource === 'GPS LOCK' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}></span>
+              {/* Map Info Overlay */}
+              <div className="absolute top-4 right-4 bg-slate-950/90 border border-slate-800 p-4 rounded-xl z-[1000] w-72 text-xs font-mono backdrop-blur-md shadow-2xl space-y-2">
+                <div className="font-bold text-cyan-400 border-b border-slate-800 pb-2 flex items-center justify-between">
+                  <span>🛰️ TACTICAL GPS LOCK</span>
+                  <span className={`w-2.5 h-2.5 rounded-full ${locationSource === 'GPS LOCK' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}></span>
                 </div>
-                <div className="space-y-1 text-slate-300">
+                <div className="space-y-1.5 text-slate-300">
                   <div className="flex justify-between">
-                    <span>Status:</span>
-                    <span className={`font-bold ${locationSource === 'GPS LOCK' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                      {locationSource}
-                    </span>
+                    <span>Source:</span>
+                    <span className="text-emerald-400 font-bold">{locationSource}</span>
                   </div>
                   <div className="flex justify-between">
                     <span>Latitude:</span>
@@ -1096,142 +1028,268 @@ export default function App() {
                     <span>Longitude:</span>
                     <span className="text-white">{laptopLocation ? laptopLocation[1].toFixed(5) : 'N/A'}</span>
                   </div>
-                  {gpsError && (
-                    <div className="text-rose-400 text-[10px] mt-1.5 border-t border-slate-800/50 pt-1.5 whitespace-normal break-words leading-relaxed">
-                      ⚠️ {gpsError}
-                    </div>
-                  )}
                 </div>
-                <button
-                  onClick={triggerGpsSync}
-                  className="mt-2.5 w-full bg-blue-600 hover:bg-blue-500 text-white font-sans py-1.5 px-2 rounded font-bold text-[10px] uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin-slow" />
-                  Sync Live GPS
-                </button>
               </div>
             </div>
-          </section>
-        </div>
-
-        {/* Center Panel (Continuous Feeds) */}
-        <div className="lg:col-span-4 flex flex-col gap-6 overflow-hidden">
-          <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-            <Radio className="w-4 h-4 text-blue-400" />
-            Live Camera Feeds (Continuous)
-          </h2>
-          <div className="grid grid-rows-2 gap-4 flex-1 overflow-y-auto pr-2">
-            {/* Camera Feed 1 runs webcam continuously */}
-            <div className="bg-black border border-slate-900 rounded-xl overflow-hidden relative min-h-[220px]">
-              <CameraFeed
-                cameraId="CAM_01"
-                cameraName="LOCAL_LAPTOP_NODE"
-                latitude={laptopLocation ? laptopLocation[0] : CURRENT_NODE_LOCATION.lat}
-                longitude={laptopLocation ? laptopLocation[1] : CURRENT_NODE_LOCATION.lng}
-                enrolledTargets={enrolledTargets}
-                enrolledPlates={enrolledPlates}
-                onDetection={handleDetection}
-                onLocationClick={highlightCameraPin}
-              />
-            </div>
-
-            <div className="bg-black border border-slate-900 rounded-xl overflow-hidden relative flex items-center justify-center min-h-[220px] group">
-              {engineMode === 'FOG-CLUSTER' && connectedCameras['Camera Slot 2'] ? (
-                <CameraFeed
-                  cameraId={connectedCameras['Camera Slot 2'].cameraId}
-                  cameraName="UPTOWN_NODE"
-                  latitude={laptopLocation ? laptopLocation[0] + 0.005 : CURRENT_NODE_LOCATION.lat + 0.005}
-                  longitude={laptopLocation ? laptopLocation[1] + 0.005 : CURRENT_NODE_LOCATION.lng + 0.005}
-                  streamUrl={`http://localhost:8000/video_feed_slot/${encodeURIComponent('Camera Slot 2')}`}
-                  enrolledTargets={enrolledTargets}
-                  enrolledPlates={enrolledPlates}
-                  onDetection={handleDetection}
-                  onLocationClick={highlightCameraPin}
-                />
-              ) : (
-                <span className="text-xs text-slate-500 uppercase">Camera 02 // STANDBY</span>
-              )}
-            </div>
           </div>
-        </div>
+        )}
 
-        {/* Right Panel (Alerts Feed) */}
-        <div className="lg:col-span-4 flex flex-col gap-4 overflow-hidden h-full">
-          <div className="flex items-center justify-between border-b border-slate-900 pb-2">
-            <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-              <Bell className="w-4 h-4 text-blue-400" />
-              Interactive Alerts Feed
-            </h2>
-            <div className="flex items-center gap-2">
+        {/* TAB 3: WATCHLIST & SECURITY RULES VIEW */}
+        {activeTab === 'RULES_WATCHLIST' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Watchlist Enrollment Card */}
+            <section className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+              <h2 className="text-sm font-semibold tracking-wider text-slate-300 uppercase flex items-center gap-2 mb-4">
+                <UserPlus className="w-4 h-4 text-blue-400" />
+                Watchlist Enrollment (Face Target Photo & ANPR Plate)
+              </h2>
+              <form onSubmit={handleEnrollSubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Subject Full Name</label>
+                  <input
+                    type="text"
+                    value={enrollForm.name}
+                    onChange={(e) => setEnrollForm(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="Subject Full Name (e.g. John Doe)"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-blue-500 outline-none"
+                  />
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setSelectedFile(e.target.files[0])}
+                    className="text-xs text-slate-400 block w-full mt-2"
+                  />
+                </div>
+
+                <div className="border-t border-slate-800/80 my-3"></div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Car className="w-3.5 h-3.5 text-amber-400" />
+                    Target License Plate (ANPR)
+                  </label>
+                  <input
+                    type="text"
+                    value={enrollForm.targetPlate}
+                    onChange={(e) => setEnrollForm(prev => ({ ...prev, targetPlate: e.target.value }))}
+                    placeholder="e.g. DL01AB1234"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-amber-300 uppercase tracking-widest focus:border-amber-500 outline-none"
+                  />
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-all"
+                  >
+                    Enroll Target to Watchlist
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSnapWebcamFace}
+                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+                  >
+                    <Camera className="w-4 h-4" />
+                    Snap Face
+                  </button>
+                </div>
+              </form>
+
+              {enrollStatus.success && (
+                <div className="mt-4 text-xs p-3 bg-emerald-950/40 border border-emerald-800/50 text-emerald-400 rounded-lg">
+                  {enrollStatus.success}
+                </div>
+              )}
+              {enrollStatus.error && (
+                <div className="mt-4 text-xs p-3 bg-rose-950/40 border border-rose-800/50 text-rose-400 rounded-lg">
+                  {enrollStatus.error}
+                </div>
+              )}
+
+              {/* Enrolled Targets Gallery */}
+              <div className="mt-6 pt-4 border-t border-slate-800">
+                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3">Enrolled Targets ({enrolledTargets.length})</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  {enrolledTargets.map((target, idx) => (
+                    <div key={idx} className="p-2 bg-slate-950 border border-slate-800 rounded-lg flex flex-col items-center gap-1">
+                      <img src={target.imageSrc} alt={target.name} className="w-12 h-12 object-cover rounded-full border border-blue-500" />
+                      <span className="text-[10px] font-bold text-slate-200 truncate max-w-full">{target.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            {/* Restricted Zone Rules Card */}
+            <section className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+              <h2 className="text-sm font-semibold tracking-wider text-slate-300 uppercase flex items-center gap-2 mb-4">
+                <AlertOctagon className="w-4 h-4 text-rose-500" />
+                Restricted Zone & Off-Hours Security Rules
+              </h2>
+              <form onSubmit={handleAddRule} className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-1">Rule Designation</label>
+                  <input
+                    type="text"
+                    value={ruleForm.name}
+                    onChange={(e) => setRuleForm(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="e.g. Night Perimeter Intrusion Guard"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:border-rose-500 outline-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Camera Node</label>
+                    <select
+                      value={ruleForm.cameraId}
+                      onChange={(e) => setRuleForm(prev => ({ ...prev, cameraId: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none"
+                    >
+                      <option value="CAM_01">CAM_01 (LOCAL_NODE)</option>
+                      <option value="CAM_02">CAM_02 (UPTOWN_NODE)</option>
+                      <option value="ALL_CAMERAS">ALL SURVEILLANCE NODES</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Constraint</label>
+                    <select
+                      value={ruleForm.constraint}
+                      onChange={(e) => setRuleForm(prev => ({ ...prev, constraint: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none"
+                    >
+                      <option value="PERSON_OR_CAR">ANY PERSON OR CAR</option>
+                      <option value="PERSON_ONLY">PERSON ONLY</option>
+                      <option value="VEHICLE_ONLY">VEHICLE ONLY</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Start Time</label>
+                    <input
+                      type="time"
+                      value={ruleForm.startTime}
+                      onChange={(e) => setRuleForm(prev => ({ ...prev, startTime: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-rose-300 font-mono outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">End Time</label>
+                    <input
+                      type="time"
+                      value={ruleForm.endTime}
+                      onChange={(e) => setRuleForm(prev => ({ ...prev, endTime: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-rose-300 font-mono outline-none"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
+                >
+                  <Clock className="w-4 h-4" />
+                  Create Security Intrusion Rule
+                </button>
+              </form>
+
+              {/* Active Rules List */}
+              <div className="mt-6 pt-4 border-t border-slate-800 space-y-2">
+                <div className="text-xs font-bold text-slate-400 uppercase flex justify-between">
+                  <span>Active Intrusion Rules</span>
+                  <span className="text-rose-400 font-mono">{restrictedRules.filter(r => r.enabled).length} ACTIVE</span>
+                </div>
+                {restrictedRules.map((rule) => (
+                  <div key={rule.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs flex justify-between items-center">
+                    <div>
+                      <div className="font-bold text-slate-200">{rule.name}</div>
+                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">📍 {rule.cameraId} | ⏰ {rule.startTime} - {rule.endTime}</div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleRule(rule.id)}
+                      className={`px-2 py-1 rounded text-[10px] font-bold ${rule.enabled ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-slate-900 text-slate-500'}`}
+                    >
+                      {rule.enabled ? 'ENABLED' : 'PAUSED'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* TAB 4: RECORDINGS & ALERTS VIEW */}
+        {activeTab === 'RECORDINGS' && (
+          <div className="flex flex-col gap-4 max-w-4xl mx-auto">
+            <div className="flex items-center justify-between border-b border-slate-900 pb-3">
+              <h2 className="text-base font-bold tracking-wider text-slate-200 uppercase flex items-center gap-2">
+                <Bell className="w-5 h-5 text-blue-400" />
+                Interactive Telemetry & Video Clip Recordings Feed
+              </h2>
               {engineMode === 'CLIENT-SIDE' && localAlerts.length > 0 && (
                 <button
                   onClick={() => {
                     setLocalAlerts([]);
                     localStorage.removeItem('watchlist_alerts');
                   }}
-                  className="text-[10px] text-rose-400 hover:text-rose-300 font-bold uppercase tracking-wider transition-colors bg-slate-950 border border-slate-800 px-2 py-0.5 rounded cursor-pointer"
+                  className="text-xs text-rose-400 hover:text-rose-300 font-bold uppercase tracking-wider bg-slate-950 border border-slate-800 px-3 py-1 rounded cursor-pointer"
                 >
-                  Clear
+                  Clear All Alerts
                 </button>
               )}
-              <span className="text-[10px] text-slate-500 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-                {activeAlerts.length} Records
-              </span>
             </div>
-          </div>
 
-          <div className="flex-1 overflow-y-auto space-y-4 pr-2 pb-6">
-            {activeAlerts.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-48 border border-dashed border-slate-800 rounded-xl text-slate-500 text-sm gap-2">
-                <AlertOctagon className="w-8 h-8 text-slate-600" />
-                No targets matched in active feeds.
-              </div>
-            ) : (
-              activeAlerts.map((alert) => (
-                <div
-                  key={alert.id}
-                  className={`p-3.5 rounded-xl border transition-all text-xs space-y-2 hover:bg-slate-900/90 ${alert.severity === 'CRITICAL' ? 'bg-rose-950/20 border-rose-900/50 hover:border-rose-700/60' :
-                    'bg-slate-900/60 border-slate-800/80 hover:border-slate-700/60'
-                    }`}
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-mono font-bold tracking-wider flex items-center gap-1.5 text-slate-200">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                      {alert.event_type}
-                    </span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800/50">
-                      {alert.severity}
-                    </span>
-                  </div>
+            <div className="space-y-4">
+              {activeAlerts.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-64 border border-dashed border-slate-800 rounded-2xl text-slate-500 gap-3">
+                  <AlertOctagon className="w-10 h-10 text-slate-600" />
+                  No detection alerts recorded yet.
+                </div>
+              ) : (
+                activeAlerts.map((alert) => (
+                  <div
+                    key={alert.id}
+                    className={`p-5 rounded-2xl border transition-all space-y-3 ${alert.severity === 'CRITICAL' ? 'bg-rose-950/20 border-rose-900/50' : 'bg-slate-900/60 border-slate-800/80'}`}
+                  >
+                    <div className="flex justify-between items-center">
+                      <span className="font-mono font-bold tracking-wider text-sm flex items-center gap-2 text-slate-200">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                        {alert.event_type}
+                      </span>
+                      <span className="px-3 py-1 rounded text-xs font-bold bg-rose-950 text-rose-400 border border-rose-800/50">
+                        {alert.severity}
+                      </span>
+                    </div>
 
-                  <div className="text-slate-300 font-semibold text-sm">
-                    {alert.event_type === 'PLATE MATCH' ? 'Plate Flagged: ' : 'Subject Matched: '}
-                    <span className={alert.event_type === 'PLATE MATCH' ? 'text-amber-400 font-mono font-bold' : 'text-emerald-400'}>
-                      {alert.subject || alert.details}
-                    </span>
-                  </div>
+                    <div className="text-slate-200 font-semibold text-base">
+                      {alert.details || `Spotted: ${alert.subject}`}
+                    </div>
 
-                  <div className="flex flex-col gap-1 text-[10px] text-slate-400 font-mono">
-                    <button
-                      onClick={() => highlightCameraPin(alert.camera_id)}
-                      className="flex items-center gap-1.5 hover:text-blue-400 text-left transition-colors font-semibold group cursor-pointer"
-                    >
-                      <MapPin className="w-3.5 h-3.5 text-blue-500 group-hover:animate-bounce" />
-                      <span>{alert.address}</span>
-                    </button>
-                    <div className="pl-5 text-slate-500 text-[9px] flex justify-between items-center">
-                      <span>GPS: {alert.lat ? alert.lat.toFixed(5) : '0.00'}, {alert.lng ? alert.lng.toFixed(5) : '0.00'}</span>
-                      <span className="flex items-center gap-0.5 text-slate-500 font-sans">
-                        <Clock className="w-3 h-3" />
+                    {/* Playable Recorded Video Clip */}
+                    {alert.videoUrl && (
+                      <div className="mt-3 rounded-xl overflow-hidden border border-slate-800 bg-black">
+                        <div className="text-xs font-mono text-cyan-400 bg-slate-950 px-3 py-1.5 font-bold flex items-center gap-2">
+                          🎥 RECORDED EVIDENCE VIDEO CLIP
+                        </div>
+                        <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-72 object-contain" />
+                      </div>
+                    )}
+
+                    <div className="flex justify-between items-center text-xs text-slate-400 font-mono pt-2 border-t border-slate-800/60">
+                      <span>📍 {alert.address} (GPS: {alert.lat ? alert.lat.toFixed(4) : '0.00'}, {alert.lng ? alert.lng.toFixed(4) : '0.00'})</span>
+                      <span className="flex items-center gap-1 text-slate-400 font-sans">
+                        <Clock className="w-3.5 h-3.5" />
                         {alert.timestamp}
                       </span>
                     </div>
                   </div>
-                </div>
-              ))
-            )}
+                ))
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Add IP CCTV Stream Modal */}
