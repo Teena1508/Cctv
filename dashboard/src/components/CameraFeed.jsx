@@ -966,10 +966,8 @@ export default function CameraFeed({
                             const bw = x2 - x1;
                             const bh = y2 - y1;
 
-                            // Smooth alpha fade during hysteresis grace period (>400ms without fresh match)
-                            const age = now - (det.lastSeen || now);
-                            const alpha = age > 400 ? Math.max(0.15, 1.0 - (age - 400) / 800) : 1.0;
-                            ctx.globalAlpha = alpha;
+                            // Keep bounding boxes 100% solid, bright, and crisp at full opacity without fading
+                            ctx.globalAlpha = 1.0;
 
                             const isFace = det.type === 'FACE';
                             const isObject = det.type === 'OBJECT';
