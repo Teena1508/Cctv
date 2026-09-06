@@ -62,46 +62,51 @@ function compressTargetPortrait(imageSource, maxDim = 256) {
       resolve(null);
       return;
     }
-    const img = new Image();
-    let blobUrl = null;
-    if (typeof imageSource === 'string' && (imageSource.startsWith('http://') || imageSource.startsWith('https://'))) {
-      img.crossOrigin = 'anonymous';
-    }
-    img.onload = () => {
-      try {
-        const offCanvas = document.createElement('canvas');
-        offCanvas.width = maxDim;
-        offCanvas.height = maxDim;
-        const ctx = offCanvas.getContext('2d');
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, maxDim, maxDim);
 
-        const srcW = img.naturalWidth || img.width || maxDim;
-        const srcH = img.naturalHeight || img.height || maxDim;
-
-        const cropW = Math.min(srcW, srcH);
-        const cropH = cropW;
-        const sx = (srcW - cropW) / 2;
-        const sy = Math.max(0, (srcH - cropH) / 4);
-
-        ctx.drawImage(img, sx, sy, cropW, cropH, 0, 0, maxDim, maxDim);
-        const compressedBase64 = offCanvas.toDataURL('image/jpeg', 0.82);
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        resolve(compressedBase64);
-      } catch (e) {
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        resolve(typeof imageSource === 'string' ? imageSource : null);
+    const processImg = (src) => {
+      const img = new Image();
+      if (typeof src === 'string' && (src.startsWith('http://') || src.startsWith('https://'))) {
+        img.crossOrigin = 'anonymous';
       }
+      img.onload = () => {
+        try {
+          const offCanvas = document.createElement('canvas');
+          offCanvas.width = maxDim;
+          offCanvas.height = maxDim;
+          const ctx = offCanvas.getContext('2d');
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(0, 0, maxDim, maxDim);
+
+          const srcW = img.naturalWidth || img.width || maxDim;
+          const srcH = img.naturalHeight || img.height || maxDim;
+
+          const cropW = Math.min(srcW, srcH);
+          const cropH = cropW;
+          const sx = (srcW - cropW) / 2;
+          const sy = Math.max(0, (srcH - cropH) / 4);
+
+          ctx.drawImage(img, sx, sy, cropW, cropH, 0, 0, maxDim, maxDim);
+          const compressedBase64 = offCanvas.toDataURL('image/jpeg', 0.82);
+          resolve(compressedBase64);
+        } catch (e) {
+          resolve(typeof src === 'string' ? src : null);
+        }
+      };
+      img.onerror = () => {
+        resolve(typeof src === 'string' ? src : null);
+      };
+      img.src = src;
     };
-    img.onerror = () => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-      resolve(typeof imageSource === 'string' ? imageSource : null);
-    };
-    if (typeof imageSource === 'string') {
-      img.src = imageSource;
+
+    if (imageSource instanceof Blob || imageSource instanceof File) {
+      const reader = new FileReader();
+      reader.onload = (e) => processImg(e.target.result);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(imageSource);
+    } else if (typeof imageSource === 'string') {
+      processImg(imageSource);
     } else {
-      blobUrl = URL.createObjectURL(imageSource);
-      img.src = blobUrl;
+      resolve(null);
     }
   });
 }

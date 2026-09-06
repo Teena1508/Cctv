@@ -243,7 +243,8 @@ function getTargetImageSignature(imageSrc) {
         }
         img.onload = () => {
             clearTimeout(timeoutId);
-            const sig = getCanvasImageSignature(img, 24, 24, null);
+            const targetFaceCrop = { x: 0.12, y: 0.08, w: 0.76, h: 0.82 };
+            const sig = getCanvasImageSignature(img, 24, 24, targetFaceCrop);
             if (sig) targetSignatureCache.set(imageSrc, sig);
             resolve(sig);
         };
@@ -734,7 +735,7 @@ export default function CameraFeed({
                                     const bx2 = srcWidth * (crop.x + crop.w);
                                     const by2 = srcHeight * (crop.y + crop.h);
 
-                                    if (bestMatch && bestMatch.score >= 0.65) {
+                                    if (bestMatch && bestMatch.score >= 0.52) {
                                         const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
                                         const matchConfidence = Math.min(99, Math.max(88, Math.round((bestMatch.score) * 100)));

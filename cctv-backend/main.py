@@ -210,6 +210,14 @@ def get_target_embedding(target):
     resized_img, _ = resize_for_face_detection(img)
     faces = face_analyzer.get(resized_img)
 
+    # 1. Padded border fallback: InsightFace det_10g requires surrounding context for tight face crops
+    if not faces and resized_img is not None:
+        h, w = resized_img.shape[:2]
+        pad_h, pad_w = max(40, h), max(40, w)
+        padded = cv2.copyMakeBorder(resized_img, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REFLECT)
+        faces = face_analyzer.get(padded)
+
+    # 2. Contrast enhancement fallback (CLAHE)
     if not faces and resized_img is not None and len(resized_img.shape) == 3:
         lab = cv2.cvtColor(resized_img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -623,7 +631,7 @@ def scan_face(
                     margin_valid = True
                     if len(scores) > 1 and not is_fallback:
                         second_name, second_sim = scores[1]
-                        if second_sim > 0.20 and (candidate_sim - second_sim) < 0.03:
+                        if candidate_sim < 0.45 and second_sim > 0.20 and (candidate_sim - second_sim) < 0.03 and candidate_name != second_name:
                             margin_valid = False
 
                     if candidate_sim >= threshold and margin_valid:
