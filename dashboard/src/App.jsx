@@ -207,15 +207,6 @@ export default function App() {
         endTime: '06:00',
         constraint: 'PERSON_OR_CAR',
         enabled: true
-      },
-      {
-        id: 'RULE_UPTOWN_RESTRICTED',
-        name: 'Uptown Restricted Area Watch',
-        cameraId: 'CAM_02',
-        startTime: '20:00',
-        endTime: '07:00',
-        constraint: 'PERSON_OR_CAR',
-        enabled: true
       }
     ];
   });
@@ -299,20 +290,6 @@ export default function App() {
     } catch (err) { }
   };
 
-  // Camera stream states
-  const [connectedCameras, setConnectedCameras] = useState({});
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalForm, setModalForm] = useState({
-    cameraId: '',
-    ipAddress: '',
-    port: '554',
-    rtspPath: '',
-    username: '',
-    password: '',
-    targetSlot: 'Camera Slot 2'
-  });
-  const [modalLoading, setModalLoading] = useState(false);
-  const [modalError, setModalError] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
 
   // Dynamic Geolocation state (Tracks current physical laptop location)
@@ -475,13 +452,6 @@ export default function App() {
       lat: laptopLocation ? laptopLocation[0] : CURRENT_NODE_LOCATION.lat,
       lng: laptopLocation ? laptopLocation[1] : CURRENT_NODE_LOCATION.lng,
       address: CURRENT_NODE_LOCATION.address
-    },
-    {
-      id: 'CAM_02',
-      name: 'UPTOWN_NODE',
-      lat: laptopLocation ? laptopLocation[0] + 0.005 : CURRENT_NODE_LOCATION.lat + 0.005,
-      lng: laptopLocation ? laptopLocation[1] + 0.005 : CURRENT_NODE_LOCATION.lng + 0.005,
-      address: 'Fixed Node Slot 2'
     }
   ];
 
@@ -629,62 +599,7 @@ export default function App() {
     };
   };
 
-  const handleModalSubmit = async (e) => {
-    e.preventDefault();
-    if (!modalForm.cameraId || !modalForm.ipAddress) {
-      setModalError("Camera ID and IP Address are required.");
-      return;
-    }
 
-    setModalLoading(true);
-    setModalError(null);
-
-    try {
-      const res = await fetch("http://localhost:8000/api/v1/connect-camera", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          camera_id: modalForm.cameraId,
-          ip_address: modalForm.ipAddress,
-          port: parseInt(modalForm.port) || 554,
-          rtsp_path: modalForm.rtspPath,
-          username: modalForm.username,
-          password: modalForm.password,
-          target_slot: modalForm.targetSlot
-        })
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        setConnectedCameras(prev => ({
-          ...prev,
-          [modalForm.targetSlot]: {
-            cameraId: modalForm.cameraId,
-            ipAddress: modalForm.ipAddress,
-            targetSlot: modalForm.targetSlot
-          }
-        }));
-        setIsModalOpen(false);
-        setToastMessage("Camera connected & streaming successfully!");
-        setTimeout(() => setToastMessage(null), 4000);
-        setModalForm({
-          cameraId: '',
-          ipAddress: '',
-          port: '554',
-          rtspPath: '',
-          username: '',
-          password: '',
-          targetSlot: 'Camera Slot 2'
-        });
-      } else {
-        setModalError(data.detail || "Failed to ping IP stream.");
-      }
-    } catch (err) {
-      setModalError("Failed to connect to backend server.");
-    } finally {
-      setModalLoading(false);
-    }
-  };
 
 
 
@@ -817,13 +732,10 @@ export default function App() {
               CLIENT-SIDE ENGINE
             </button>
             <button
-              onClick={() => {
-                setEngineMode('FOG-CLUSTER');
-                setIsModalOpen(true);
-              }}
+              onClick={() => setEngineMode('FOG-CLUSTER')}
               className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${engineMode === 'FOG-CLUSTER' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
             >
-              ADD IP CAMERA / FOG
+              FOG-CLUSTER ENGINE
             </button>
           </div>
 
@@ -901,21 +813,7 @@ export default function App() {
                 />
               </div>
 
-              {engineMode === 'FOG-CLUSTER' && connectedCameras['Camera Slot 2'] && (
-                <div className="bg-slate-950 border border-slate-900 rounded-2xl overflow-hidden p-2 flex flex-col items-center justify-center mt-2">
-                  <CameraFeed
-                    cameraId={connectedCameras['Camera Slot 2'].cameraId}
-                    cameraName="UPTOWN_NODE"
-                    latitude={laptopLocation ? laptopLocation[0] + 0.005 : CURRENT_NODE_LOCATION.lat + 0.005}
-                    longitude={laptopLocation ? laptopLocation[1] + 0.005 : CURRENT_NODE_LOCATION.lng + 0.005}
-                    streamUrl={`http://localhost:8000/video_feed_slot/${encodeURIComponent('Camera Slot 2')}`}
-                    enrolledTargets={enrolledTargets}
-                    enrolledPlates={enrolledPlates}
-                    onDetection={handleDetection}
-                    onLocationClick={() => setActiveTab('MAP')}
-                  />
-                </div>
-              )}
+
             </div>
 
             {/* Quick Live Alerts Feed */}
@@ -1199,7 +1097,6 @@ export default function App() {
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none"
                     >
                       <option value="CAM_01">CAM_01 (LOCAL_NODE)</option>
-                      <option value="CAM_02">CAM_02 (UPTOWN_NODE)</option>
                       <option value="ALL_CAMERAS">ALL SURVEILLANCE NODES</option>
                     </select>
                   </div>
@@ -1410,91 +1307,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Add IP CCTV Stream Modal */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
-            <h2 className="text-lg font-bold text-slate-100 mb-4 flex items-center gap-2">
-              <Radio className="w-5 h-5 text-blue-500 animate-pulse" />
-              Add IP CCTV Stream
-            </h2>
 
-            {modalError && (
-              <div className="mb-4 text-xs p-3 bg-rose-950/30 border border-rose-800/40 text-rose-400 rounded-lg">
-                {modalError}
-              </div>
-            )}
-
-            <form onSubmit={handleModalSubmit} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">Camera ID</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. CAM_02"
-                    value={modalForm.cameraId}
-                    onChange={(e) => setModalForm(prev => ({ ...prev, cameraId: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">IP Address</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="192.168.1.100"
-                    value={modalForm.ipAddress}
-                    onChange={(e) => setModalForm(prev => ({ ...prev, ipAddress: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">RTSP Port</label>
-                  <input
-                    type="number"
-                    placeholder="554"
-                    value={modalForm.port}
-                    onChange={(e) => setModalForm(prev => ({ ...prev, port: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">RTSP Path</label>
-                  <input
-                    type="text"
-                    placeholder="/live"
-                    value={modalForm.rtspPath}
-                    onChange={(e) => setModalForm(prev => ({ ...prev, rtspPath: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="flex gap-3 justify-end pt-4">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 border border-slate-800 rounded-lg text-xs font-bold text-slate-400 hover:bg-slate-900"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={modalLoading}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white rounded-lg flex items-center gap-2"
-                >
-                  {modalLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  Connect & Stream
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Toast Notification */}
       {toastMessage && (
