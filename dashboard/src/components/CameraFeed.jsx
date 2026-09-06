@@ -359,12 +359,12 @@ export default function CameraFeed({
         }
     }, [lastMatch]);
 
-    // Clear stale bounding box overlays after 1.5 seconds of no update
+    // Clear stale bounding box overlays after 1.5 seconds of no update (using lastSeen timestamp)
     useEffect(() => {
         const cleanupInterval = setInterval(() => {
-            if (activeDetectionsRef.current.length > 0) {
+            if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
                 const now = Date.now();
-                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - d.timestamp) < 1500);
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || d.timestamp || now)) < 1500);
             }
         }, 500);
         return () => clearInterval(cleanupInterval);
@@ -650,8 +650,6 @@ export default function CameraFeed({
                                             severity: isUnauthorized ? 'HIGH' : 'CRITICAL',
                                         });
                                     });
-                                } else {
-                                    setLastMatch(null);
                                 }
                             }
                         } catch (backendErr) {
@@ -789,12 +787,11 @@ export default function CameraFeed({
                                             confidence: 88,
                                             severity: 'HIGH',
                                         });
-                                        break;
                                     }
                                 }
 
                                 if (!matchedFaceInFrame) {
-                                    setLastMatch(null);
+                                    // setLastMatch(null); handled by hysteresis logic below
                                 }
                             }
                         }
@@ -838,8 +835,67 @@ export default function CameraFeed({
                     }
                 }
 
-                activeDetectionsRef.current = newDetections;
-                if (newDetections.length === 0) {
+                // --- 4. TEMPORAL TRACK ASSOCIATION & HYSTERESIS GRACE PERIOD ---
+                const now = Date.now();
+                const existingTracks = activeDetectionsRef.current || [];
+
+                const calcIoU = (boxA, boxB) => {
+                    if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 0;
+                    const xA = Math.max(boxA[0], boxB[0]);
+                    const yA = Math.max(boxA[1], boxB[1]);
+                    const xB = Math.min(boxA[2], boxB[2]);
+                    const yB = Math.min(boxA[3], boxB[3]);
+                    const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+                    const boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]);
+                    const boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]);
+                    return interArea / (boxAArea + boxBArea - interArea + 1e-6);
+                };
+
+                const updatedTracks = [...existingTracks];
+
+                newDetections.forEach((det) => {
+                    // Match with existing track by label or IoU > 0.20
+                    let matchTrack = updatedTracks.find(t => 
+                        (t.type === det.type && t.label === det.label) ||
+                        (t.type === det.type && calcIoU(t.bbox, det.bbox) > 0.20)
+                    );
+
+                    if (matchTrack) {
+                        // Update target bbox, confidence, and timestamp while preserving smoothBox!
+                        matchTrack.bbox = [...det.bbox];
+                        matchTrack.label = det.label;
+                        matchTrack.type = det.type;
+                        matchTrack.confidence = det.confidence;
+                        matchTrack.lastSeen = now;
+                    } else {
+                        // Create new track with smoothBox initialized to target bbox
+                        updatedTracks.push({
+                            id: `${det.type}_${det.label}_${Math.random().toString(36).substring(2, 6)}`,
+                            type: det.type,
+                            label: det.label,
+                            bbox: [...det.bbox],
+                            smoothBox: [...det.bbox],
+                            confidence: det.confidence,
+                            lastSeen: now,
+                            firstSeen: now
+                        });
+                    }
+                });
+
+                // Hysteresis grace period: retain active tracks for 1200ms of inactivity to eliminate box drop-out & flickering
+                const activeTracks = updatedTracks.filter(t => (now - (t.lastSeen || now)) < 1200);
+                activeDetectionsRef.current = activeTracks;
+
+                if (activeTracks.length > 0) {
+                    const topTrack = activeTracks.find(t => t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER')) || activeTracks[0];
+                    if (topTrack.label.includes('UNAUTHORIZED') || topTrack.label.includes('INTRUDER')) {
+                        setLastMatch('INTRUDER DETECTED');
+                    } else if (topTrack.label.includes('PLATE:')) {
+                        setLastMatch(topTrack.label);
+                    } else {
+                        setLastMatch(`TARGET: ${topTrack.label.replace('FACE: ', '')}`);
+                    }
+                } else {
                     setLastMatch(null);
                 }
             } catch (e) {
@@ -871,20 +927,26 @@ export default function CameraFeed({
 
                 // Clean Overlay: Render Bounding Boxes strictly for Active Detections (Faces, License Plates & Objects)
                 if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
+                    const now = Date.now();
                     activeDetectionsRef.current.forEach((det) => {
                         if (det.bbox && det.bbox.length === 4) {
                             if (!det.smoothBox) {
                                 det.smoothBox = [...det.bbox];
                             } else {
-                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.25;
-                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.25;
-                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.25;
-                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.25;
+                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.30;
+                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.30;
+                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.30;
+                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.30;
                             }
 
                             const [x1, y1, x2, y2] = det.smoothBox;
                             const bw = x2 - x1;
                             const bh = y2 - y1;
+
+                            // Smooth alpha fade during hysteresis grace period (>400ms without fresh match)
+                            const age = now - (det.lastSeen || now);
+                            const alpha = age > 400 ? Math.max(0.15, 1.0 - (age - 400) / 800) : 1.0;
+                            ctx.globalAlpha = alpha;
 
                             const isFace = det.type === 'FACE';
                             const isObject = det.type === 'OBJECT';
@@ -942,6 +1004,8 @@ export default function CameraFeed({
 
                             ctx.fillStyle = '#ffffff';
                             ctx.fillText(text, x1 + 8, tagY + 16);
+
+                            ctx.globalAlpha = 1.0;
                         }
                     });
                 }
