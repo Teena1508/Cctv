@@ -633,7 +633,9 @@ export default function CameraFeed({
                                             });
                                         }
 
-                                        handlePresenceLifecycle(isUnauthorized ? `INTRUDER_${cameraId}` : `FACE_${targetName}`, {
+                                        const intruderKey = `INTRUDER_${cameraId}_${Math.round((face.bbox ? face.bbox[0] : 0) / 50)}_${Math.round((face.bbox ? face.bbox[1] : 0) / 50)}`;
+
+                                        handlePresenceLifecycle(isUnauthorized ? intruderKey : `FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
                                             subject: targetName,
@@ -667,7 +669,7 @@ export default function CameraFeed({
 
                                 if ('FaceDetector' in window) {
                                     try {
-                                        const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 4 });
+                                        const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 10 });
                                         const results = await detector.detect(mediaSource);
                                         if (results && results.length > 0) {
                                             candidateCrops = results.map(f => ({
@@ -692,7 +694,6 @@ export default function CameraFeed({
                                     for (const reg of testRegions) {
                                         if (getCropSkinRatio(mediaSource, reg) >= 0.20 && hasFaceStructure(mediaSource, reg)) {
                                             candidateCrops.push(reg);
-                                            break;
                                         }
                                     }
                                 }
@@ -760,7 +761,6 @@ export default function CameraFeed({
                                             confidence: matchConfidence,
                                             severity: 'CRITICAL',
                                         });
-                                        break; // Recognized enrolled target
                                     } else {
                                         const intruderLabel = 'UNAUTHORIZED PERSON';
                                         setLastMatch(`INTRUDER DETECTED`);
@@ -773,7 +773,9 @@ export default function CameraFeed({
                                             timestamp: currentTimestamp
                                         });
 
-                                        handlePresenceLifecycle(`INTRUDER_${cameraId}`, {
+                                        const intruderKey = `INTRUDER_${cameraId}_${Math.round(bx1 / 50)}_${Math.round(by1 / 50)}`;
+
+                                        handlePresenceLifecycle(intruderKey, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'UNAUTHORIZED PRESENCE',
                                             subject: intruderLabel,
@@ -852,23 +854,43 @@ export default function CameraFeed({
                 };
 
                 const updatedTracks = [...existingTracks];
+                const claimedTrackIndices = new Set();
 
                 newDetections.forEach((det) => {
-                    // Match with existing track by label or IoU > 0.20
-                    let matchTrack = updatedTracks.find(t => 
-                        (t.type === det.type && t.label === det.label) ||
-                        (t.type === det.type && calcIoU(t.bbox, det.bbox) > 0.20)
-                    );
+                    let bestTrackIdx = -1;
+                    let maxIoU = 0.0;
 
-                    if (matchTrack) {
-                        // Update target bbox, confidence, and timestamp while preserving smoothBox!
+                    // 1. First priority: Spatial overlap (IoU >= 0.15) to track multiple distinct people independently
+                    updatedTracks.forEach((track, tIdx) => {
+                        if (!claimedTrackIndices.has(tIdx) && track.type === det.type) {
+                            const iou = calcIoU(track.bbox, det.bbox);
+                            if (iou >= 0.15 && iou > maxIoU) {
+                                maxIoU = iou;
+                                bestTrackIdx = tIdx;
+                            }
+                        }
+                    });
+
+                    // 2. Second priority: Specific named target match (e.g. FACE: John Doe) if IoU is < 0.15
+                    if (bestTrackIdx === -1 && !det.label.includes('UNAUTHORIZED PERSON')) {
+                        updatedTracks.forEach((track, tIdx) => {
+                            if (!claimedTrackIndices.has(tIdx) && track.type === det.type && track.label === det.label) {
+                                bestTrackIdx = tIdx;
+                            }
+                        });
+                    }
+
+                    if (bestTrackIdx >= 0) {
+                        // Update matched track while preserving smoothBox for smooth continuous rendering!
+                        claimedTrackIndices.add(bestTrackIdx);
+                        const matchTrack = updatedTracks[bestTrackIdx];
                         matchTrack.bbox = [...det.bbox];
                         matchTrack.label = det.label;
                         matchTrack.type = det.type;
                         matchTrack.confidence = det.confidence;
                         matchTrack.lastSeen = now;
                     } else {
-                        // Create new track with smoothBox initialized to target bbox
+                        // Create a NEW distinct track for unmatched detection!
                         updatedTracks.push({
                             id: `${det.type}_${det.label}_${Math.random().toString(36).substring(2, 6)}`,
                             type: det.type,
@@ -879,6 +901,7 @@ export default function CameraFeed({
                             lastSeen: now,
                             firstSeen: now
                         });
+                        claimedTrackIndices.add(updatedTracks.length - 1);
                     }
                 });
 
