@@ -465,26 +465,9 @@ export default function App() {
   // HANDLER: Continuous Feed with Detection & Off-Hours Restricted Zone Rules Evaluator
   const handleDetection = (detection) => {
     const activeRestrictedRules = restrictedRulesRef.current.filter(r => r.enabled);
-    const isUnauthorizedPerson = detection.subject === 'UNAUTHORIZED PERSON' || detection.eventType === 'UNAUTHORIZED PRESENCE';
-
-    // 0. Departure Events: Log clean departure alerts when subjects leave camera frame
-    if (detection.eventType === 'SUBJECT DEPARTED') {
-      const currentCam = cameras.find(c => c.id === detection.cameraId) || cameras[0];
-      const newAlert = {
-        id: Date.now() + Math.random().toString(36).substring(2, 7),
-        camera_id: currentCam.id,
-        event_type: 'SUBJECT DEPARTED',
-        severity: 'LOW',
-        details: detection.details || `👋 Subject '${detection.subject}' departed camera feed on ${currentCam.id}`,
-        subject: `DEPARTED: ${detection.subject}`,
-        lat: currentCam.lat,
-        lng: currentCam.lng,
-        address: currentCam.address,
-        timestamp: new Date().toLocaleTimeString()
-      };
-      setLocalAlerts(prev => [newAlert, ...prev]);
-      return;
-    }
+    const isUnauthorizedPerson = detection.subject === 'UNAUTHORIZED PERSON' || 
+                                  detection.subject?.includes('UNAUTHORIZED') || 
+                                  detection.eventType === 'UNAUTHORIZED PRESENCE';
 
     // 1. Silent Camera Mode: Allow detection if enrolled targets, enrolled plates, active restricted rules exist, OR if an un-enrolled intruder is detected!
     if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0 && !isUnauthorizedPerson) {
@@ -526,7 +509,31 @@ export default function App() {
       }
     }
 
-    // 5. Alert Trigger Policy Enforcement:
+    // 5. Departure Events: Log clean departure alerts when subjects leave camera frame
+    if (detection.eventType === 'SUBJECT DEPARTED') {
+      // Non-enrolled / unauthorized person departure alerts fire ONLY during active restricted timings!
+      if (isUnauthorizedPerson && !isRestrictedIntrusion) {
+        return;
+      }
+
+      const currentCam = cameras.find(c => c.id === detection.cameraId) || cameras[0];
+      const newAlert = {
+        id: Date.now() + Math.random().toString(36).substring(2, 7),
+        camera_id: currentCam.id,
+        event_type: 'SUBJECT DEPARTED',
+        severity: 'LOW',
+        details: detection.details || `👋 Subject '${detection.subject}' departed camera feed on ${currentCam.id}`,
+        subject: `DEPARTED: ${detection.subject}`,
+        lat: currentCam.lat,
+        lng: currentCam.lng,
+        address: currentCam.address,
+        timestamp: new Date().toLocaleTimeString()
+      };
+      setLocalAlerts(prev => [newAlert, ...prev]);
+      return;
+    }
+
+    // 6. Alert Trigger Policy Enforcement for Arrivals / Matches:
     // - Enrolled Targets (TARGET MATCH / PLATE MATCH): ALWAYS trigger alerts (every time, 24/7).
     // - Non-Enrolled Persons (UNAUTHORIZED PERSON): Trigger alerts ONLY during active restricted timings!
     if (isUnauthorizedPerson && !isRestrictedIntrusion) {
@@ -606,8 +613,21 @@ export default function App() {
 
   const handleEnrollSubmit = async (e) => {
     e.preventDefault();
-    if (!enrollForm.name && !selectedFile && !enrollForm.targetPlate) {
-      setEnrollStatus({ loading: false, success: null, error: "Please enter a subject name + photo OR a license plate number." });
+    const nameTrimmed = enrollForm.name.trim();
+    const plateTrimmed = enrollForm.targetPlate.trim();
+
+    if (nameTrimmed && !selectedFile) {
+      setEnrollStatus({ loading: false, success: null, error: "Please upload a photo for the subject to enroll their face target." });
+      return;
+    }
+
+    if (selectedFile && !nameTrimmed) {
+      setEnrollStatus({ loading: false, success: null, error: "Please enter a subject name for the uploaded photo." });
+      return;
+    }
+
+    if (!nameTrimmed && !selectedFile && !plateTrimmed) {
+      setEnrollStatus({ loading: false, success: null, error: "Please enter a subject name and upload a photo, or enter a license plate number." });
       return;
     }
 
@@ -616,29 +636,30 @@ export default function App() {
     try {
       let updatedTargets = [...enrolledTargets];
       let updatedPlates = [...enrolledPlates];
+      let enrolledItems = [];
 
       // Enroll Face Target with compressed Base64 encoding
-      if (enrollForm.name && selectedFile) {
+      if (nameTrimmed && selectedFile) {
         const compressedImage = await compressTargetPortrait(selectedFile, 256);
         if (compressedImage) {
-          const targetName = enrollForm.name.trim() || 'TARGET';
           const newTarget = {
-            name: targetName,
+            name: nameTrimmed,
             imageSrc: compressedImage
           };
-          updatedTargets = [...updatedTargets.filter(t => t.name !== targetName), newTarget];
+          updatedTargets = [...updatedTargets.filter(t => t.name !== nameTrimmed), newTarget];
           setEnrolledTargets(updatedTargets);
           try {
             localStorage.setItem('watchlist_targets', JSON.stringify(updatedTargets));
           } catch (storageErr) {
             console.warn("LocalStorage error:", storageErr);
           }
+          enrolledItems.push(`Face '${nameTrimmed}'`);
         }
       }
 
       // Enroll License Plate Target
-      if (enrollForm.targetPlate.trim()) {
-        const cleanedPlate = enrollForm.targetPlate.trim().toUpperCase();
+      if (plateTrimmed) {
+        const cleanedPlate = plateTrimmed.toUpperCase();
         if (!updatedPlates.includes(cleanedPlate)) {
           updatedPlates = [...updatedPlates, cleanedPlate];
           setEnrolledPlates(updatedPlates);
@@ -648,11 +669,12 @@ export default function App() {
             console.warn("LocalStorage error:", storageErr);
           }
         }
+        enrolledItems.push(`Plate '${cleanedPlate}'`);
       }
 
       setEnrollStatus({
         loading: false,
-        success: `Target(s) enrolled & persisted successfully!`,
+        success: `✅ ${enrolledItems.join(' & ')} enrolled & persisted successfully!`,
         error: null
       });
 
@@ -709,6 +731,26 @@ export default function App() {
       setEnrollForm(prev => ({ ...prev, name: '' }));
     } catch (err) {
       setEnrollStatus({ loading: false, success: null, error: "Webcam snapshot failed." });
+    }
+  };
+
+  const handleDeleteTarget = (targetNameToDelete) => {
+    const updated = enrolledTargets.filter(t => t.name !== targetNameToDelete);
+    setEnrolledTargets(updated);
+    try {
+      localStorage.setItem('watchlist_targets', JSON.stringify(updated));
+    } catch (e) {
+      console.warn("LocalStorage error:", e);
+    }
+  };
+
+  const handleDeletePlate = (plateToDelete) => {
+    const updated = enrolledPlates.filter(p => p !== plateToDelete);
+    setEnrolledPlates(updated);
+    try {
+      localStorage.setItem('watchlist_plates', JSON.stringify(updated));
+    } catch (e) {
+      console.warn("LocalStorage error:", e);
     }
   };
 
@@ -1058,15 +1100,58 @@ export default function App() {
 
               {/* Enrolled Targets Gallery */}
               <div className="mt-6 pt-4 border-t border-slate-800">
-                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3">Enrolled Targets ({enrolledTargets.length})</h3>
-                <div className="grid grid-cols-3 gap-3">
-                  {enrolledTargets.map((target, idx) => (
-                    <div key={idx} className="p-2 bg-slate-950 border border-slate-800 rounded-lg flex flex-col items-center gap-1">
-                      <img src={target.imageSrc} alt={target.name} className="w-12 h-12 object-cover rounded-full border border-blue-500" />
-                      <span className="text-[10px] font-bold text-slate-200 truncate max-w-full">{target.name}</span>
-                    </div>
-                  ))}
-                </div>
+                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3">Enrolled Face Targets ({enrolledTargets.length})</h3>
+                {enrolledTargets.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic p-3 border border-dashed border-slate-800 rounded-lg text-center">
+                    No face targets enrolled.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3">
+                    {enrolledTargets.map((target, idx) => (
+                      <div key={idx} className="p-2 bg-slate-950 border border-slate-800 rounded-lg flex flex-col items-center gap-1.5 relative group">
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTarget(target.name)}
+                          title={`Delete enrolled face: ${target.name}`}
+                          className="absolute top-1 right-1 p-1 bg-rose-950/80 hover:bg-rose-600 text-rose-300 hover:text-white rounded-full transition-all border border-rose-800/50 cursor-pointer shadow-md opacity-80 group-hover:opacity-100"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        <img src={target.imageSrc} alt={target.name} className="w-12 h-12 object-cover rounded-full border border-blue-500 mt-1" />
+                        <span className="text-[10px] font-bold text-slate-200 truncate max-w-full">{target.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Enrolled License Plates Gallery */}
+              <div className="mt-4 pt-4 border-t border-slate-800">
+                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3 flex items-center gap-1.5">
+                  <Car className="w-3.5 h-3.5 text-amber-400" />
+                  Enrolled License Plates ({enrolledPlates.length})
+                </h3>
+                {enrolledPlates.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic p-3 border border-dashed border-slate-800 rounded-lg text-center">
+                    No license plates enrolled.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {enrolledPlates.map((plate, idx) => (
+                      <div key={idx} className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg flex items-center justify-between font-mono text-xs font-bold text-amber-300">
+                        <span>{plate}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePlate(plate)}
+                          title={`Delete enrolled plate: ${plate}`}
+                          className="p-1 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
 

@@ -633,7 +633,7 @@ export default function CameraFeed({
                                             });
                                         }
 
-                                        const intruderKey = `INTRUDER_${cameraId}_${Math.round((face.bbox ? face.bbox[0] : 0) / 50)}_${Math.round((face.bbox ? face.bbox[1] : 0) / 50)}`;
+                                        const intruderKey = `INTRUDER_${cameraId}`;
 
                                         handlePresenceLifecycle(isUnauthorized ? intruderKey : `FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -773,7 +773,7 @@ export default function CameraFeed({
                                             timestamp: currentTimestamp
                                         });
 
-                                        const intruderKey = `INTRUDER_${cameraId}_${Math.round(bx1 / 50)}_${Math.round(by1 / 50)}`;
+                                        const intruderKey = `INTRUDER_${cameraId}`;
 
                                         handlePresenceLifecycle(intruderKey, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -811,8 +811,8 @@ export default function CameraFeed({
                 const presenceMap = activePresenceMapRef.current;
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // If subject has not been seen in the last 2000 ms (2.0 seconds of absence):
-                    if (checkNow - presence.lastSeen > 2000) {
+                    // Require 3.5 seconds (3500 ms) of sustained absence before considering a subject departed
+                    if (checkNow - presence.lastSeen > 3500) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
