@@ -282,21 +282,29 @@ export default function CameraFeed({
     const mediaRecorderRef = useRef(null);
     const recordedChunksRef = useRef([]);
 
-    const triggerAlertThrottled = (subjectKey, alertData) => {
-        const now = Date.now();
-        const lastTime = lastAlertTimeRef.current.get(subjectKey) || 0;
-        if (now - lastTime > 4000) {
-            lastAlertTimeRef.current.set(subjectKey, now);
+    const activePresenceMapRef = useRef(new Map());
 
-            // Capture recorded video clip URL if chunks exist
+    const handlePresenceLifecycle = (subjectKey, alertData) => {
+        const now = Date.now();
+        const presenceMap = activePresenceMapRef.current;
+        let presence = presenceMap.get(subjectKey);
+
+        if (!presence) {
+            // --- 1. SUBJECT ARRIVAL (ENTRY ALERT - FIRED ONCE) ---
+            presence = {
+                subjectKey,
+                subjectName: alertData.subject,
+                lastSeen: now,
+                firstSeen: now
+            };
+            presenceMap.set(subjectKey, presence);
+
             let recordedVideoUrl = null;
             if (recordedChunksRef.current && recordedChunksRef.current.length > 0) {
                 try {
                     const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
                     recordedVideoUrl = URL.createObjectURL(blob);
-                } catch (e) {
-                    console.warn("Error creating video blob URL:", e);
-                }
+                } catch (e) {}
             }
 
             const alertWithRecording = {
@@ -307,6 +315,10 @@ export default function CameraFeed({
             if (onDetectionRef.current) {
                 onDetectionRef.current(alertWithRecording);
             }
+        } else {
+            // --- 2. CONTINUOUS DWELL IN FRAME ---
+            // Subject is already present. Refresh lastSeen timestamp; NO repeated entry alerts while standing in frame!
+            presence.lastSeen = now;
         }
     };
 
@@ -540,7 +552,7 @@ export default function CameraFeed({
                                             });
                                         }
 
-                                        triggerAlertThrottled(`PLATE_${matched}`, {
+                                        handlePresenceLifecycle(`PLATE_${matched}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'PLATE MATCH',
                                             subject: matched,
@@ -620,7 +632,7 @@ export default function CameraFeed({
                                             });
                                         }
 
-                                        triggerAlertThrottled(isUnauthorized ? `INTRUDER_${cameraId}` : `FACE_${targetName}`, {
+                                        handlePresenceLifecycle(isUnauthorized ? `INTRUDER_${cameraId}` : `FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
                                             subject: targetName,
@@ -671,21 +683,12 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                // Fallback candidate head/face regions when native FaceDetector is unavailable
-                                if (candidateCrops.length === 0) {
-                                    candidateCrops = [
-                                        { x: 0.25, y: 0.08, w: 0.50, h: 0.65 },
-                                        { x: 0.20, y: 0.05, w: 0.60, h: 0.75 },
-                                        { x: 0.12, y: 0.10, w: 0.45, h: 0.55 },
-                                        { x: 0.42, y: 0.10, w: 0.45, h: 0.55 }
-                                    ];
-                                }
-
+                                // DO NOT fabricate fake face bounding boxes when no detector is present or 0 faces are found.
                                 let matchedFaceInFrame = false;
 
                                 for (const crop of candidateCrops) {
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.08) continue;
+                                    if (skinRatio < 0.18) continue;
                                     if (!hasFaceStructure(mediaSource, crop)) continue;
 
                                     matchedFaceInFrame = true;
@@ -717,10 +720,10 @@ export default function CameraFeed({
                                     const bx2 = srcWidth * (crop.x + crop.w);
                                     const by2 = srcHeight * (crop.y + crop.h);
 
-                                    if (bestMatch && bestMatch.score >= 0.25) {
+                                    if (bestMatch && bestMatch.score >= 0.65) {
                                         const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
-                                        const matchConfidence = Math.min(99, Math.max(85, Math.round((bestMatch.score + 0.35) * 100)));
+                                        const matchConfidence = Math.min(99, Math.max(88, Math.round((bestMatch.score) * 100)));
 
                                         newDetections.push({
                                             type: 'FACE',
@@ -730,7 +733,7 @@ export default function CameraFeed({
                                             timestamp: currentTimestamp
                                         });
 
-                                        triggerAlertThrottled(`FACE_${targetName}`, {
+                                        handlePresenceLifecycle(`FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'TARGET MATCH',
                                             subject: targetName,
@@ -757,7 +760,7 @@ export default function CameraFeed({
                                             timestamp: currentTimestamp
                                         });
 
-                                        triggerAlertThrottled(`INTRUDER_${cameraId}`, {
+                                        handlePresenceLifecycle(`INTRUDER_${cameraId}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: 'UNAUTHORIZED PRESENCE',
                                             subject: intruderLabel,
@@ -788,6 +791,37 @@ export default function CameraFeed({
                 };
 
                 await Promise.all([scanFaceTask(), scanPlateTask()]);
+
+                // --- 3. CHECK FOR DEPARTURES (SUBJECT WENT / LEFT CAMERA FEED) ---
+                const checkNow = Date.now();
+                const presenceMap = activePresenceMapRef.current;
+
+                for (const [subjKey, presence] of presenceMap.entries()) {
+                    // If subject has not been seen in the last 2000 ms (2.0 seconds of absence):
+                    if (checkNow - presence.lastSeen > 2000) {
+                        presenceMap.delete(subjKey);
+
+                        const exactTime = formatExactTimestamp(new Date());
+                        setLastMatch(`LEFT: ${presence.subjectName}`);
+
+                        if (onDetectionRef.current) {
+                            onDetectionRef.current({
+                                id: `ALERT_LEFT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                eventType: 'SUBJECT DEPARTED',
+                                subject: presence.subjectName,
+                                details: `👋 Subject '${presence.subjectName}' departed camera feed on ${cameraId}`,
+                                lat: activeLoc.lat,
+                                lng: activeLoc.lng,
+                                address: activeLoc.address,
+                                cameraId: cameraId,
+                                cameraName: cameraName,
+                                timestamp: exactTime,
+                                confidence: 99,
+                                severity: 'LOW',
+                            });
+                        }
+                    }
+                }
 
                 activeDetectionsRef.current = newDetections;
                 if (newDetections.length === 0) {

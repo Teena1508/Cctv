@@ -10,7 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import cv2
 import numpy as np
-import easyocr
+try:
+    import easyocr
+except ImportError:
+    easyocr = None
 import insightface
 from insightface.app import FaceAnalysis
 
@@ -32,9 +35,9 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "true").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
-FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.25"))
-FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.25"))
-PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "1"))      # Require N out of M frames to confirm presence (1 = instant)
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.55"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.33"))
+PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "2"))      # Require N out of M frames to confirm presence
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
 PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
 
@@ -46,8 +49,13 @@ PLATE_WINDOW_M = int(os.getenv("PLATE_WINDOW_M", "6"))         # Sliding window 
 
 # 1. Initialize EasyOCR Reader
 print("[ANPR Engine] Loading EasyOCR Engine...")
-reader = easyocr.Reader(['en'], gpu=False)
-print("[ANPR Engine] EasyOCR Engine Ready for Digits & Plates!")
+try:
+    import easyocr
+    reader = easyocr.Reader(['en'], gpu=False)
+    print("[ANPR Engine] EasyOCR Engine Ready for Digits & Plates!")
+except Exception as e:
+    print(f"[ANPR Engine] EasyOCR optional fallback active: {e}")
+    reader = None
 
 def is_valid_face_crop(img, x, y, w, h):
     """Verifies that a detected bounding box represents a real human face by checking geometry and skin presence."""
@@ -57,7 +65,7 @@ def is_valid_face_crop(img, x, y, w, h):
     if w < 40 or h < 40 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
         return False
     aspect = float(w) / float(h)
-    if aspect < 0.65 or aspect > 1.40:
+    if aspect < 0.65 or aspect > 1.35:
         return False
 
     crop = img[y:y+h, x:x+w]
@@ -67,7 +75,7 @@ def is_valid_face_crop(img, x, y, w, h):
         ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
         mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
         skin_ratio = np.sum(mask > 0) / float(mask.size)
-        if skin_ratio < 0.12:
+        if skin_ratio < 0.18:
             return False
     return True
 
@@ -248,10 +256,10 @@ def get_target_embedding(target):
 def calibrate_similarity_confidence(sim):
     if sim is None:
         return 0.92
-    if sim < 0.20:
+    if sim < 0.25:
         return round(float(sim), 3)
-    # Map raw cosine sim [0.20, 0.55] to calibrated match confidence [0.85, 0.99]
-    norm_score = 0.85 + (min(0.55, max(0.20, float(sim))) - 0.20) / 0.35 * 0.14
+    # Map raw cosine sim [0.30, 0.65] to calibrated match confidence [0.88, 0.99]
+    norm_score = 0.88 + (min(0.65, max(0.30, float(sim))) - 0.30) / 0.35 * 0.11
     return round(float(norm_score), 3)
 
 # =========================================================================
@@ -344,7 +352,12 @@ class TemporalTracker:
                 updated_track_ids.add(best_track_id)
 
                 hits = sum(track["window"])
-                track["status"] = "CONFIRMED_PRESENT" if hits >= PERSON_CONFIRM_N else "DETECTED"
+                # Instant confirmation on 1st frame for enrolled targets!
+                if name != "UNAUTHORIZED PERSON":
+                    track["status"] = "CONFIRMED_PRESENT"
+                else:
+                    track["status"] = "CONFIRMED_PRESENT" if hits >= PERSON_CONFIRM_N else "DETECTED"
+
                 confirmed_matches.append({
                     "name": track["name"],
                     "confidence": conf,
@@ -626,16 +639,23 @@ def scan_face(
                     "confidence": calibrated_conf,
                     "bbox": orig_bbox
                 })
-            else:
+            elif det_score is not None and det_score >= 0.70 and is_valid_face_crop(frame, orig_bbox[0], orig_bbox[1], orig_bbox[2]-orig_bbox[0], orig_bbox[3]-orig_bbox[1]):
                 # UN-ENROLLED PERSON / INTRUDER DETECTED
-                unauth_conf = float(det_score if det_score is not None else 0.88)
-                person_conf_log = unauth_conf
-                person_bbox_log = orig_bbox
-                raw_matches.append({
-                    "name": "UNAUTHORIZED PERSON",
-                    "confidence": unauth_conf,
-                    "bbox": orig_bbox
-                })
+                # If valid_targets exist and similarity to top target is near-threshold (>= 0.25), do not flag as UNAUTHORIZED
+                is_near_target = False
+                if valid_targets and 'scores' in locals() and scores:
+                    if scores[0][1] >= 0.25:
+                        is_near_target = True
+
+                if not is_near_target:
+                    unauth_conf = float(det_score)
+                    person_conf_log = unauth_conf
+                    person_bbox_log = orig_bbox
+                    raw_matches.append({
+                        "name": "UNAUTHORIZED PERSON",
+                        "confidence": unauth_conf,
+                        "bbox": orig_bbox
+                    })
 
         # Apply Temporal Confirmation Tracker
         confirmed_matches = tracker.update_face_tracks(frame_id, raw_matches)
