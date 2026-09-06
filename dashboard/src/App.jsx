@@ -1143,14 +1143,7 @@ export default function App() {
                   >
                     Enroll Target to Watchlist
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleSnapWebcamFace}
-                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
-                  >
-                    <Camera className="w-4 h-4" />
-                    Snap Face
-                  </button>
+
                 </div>
               </form>
 
@@ -1323,8 +1316,8 @@ export default function App() {
                         <button
                           onClick={() => handleToggleRule(rule.id)}
                           className={`px-2 py-1 rounded text-[10px] font-bold cursor-pointer transition-all ${rule.enabled
-                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900'
-                              : 'bg-slate-900 text-slate-500 border border-slate-800 hover:bg-slate-800'
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800 hover:bg-slate-800'
                             }`}
                         >
                           {rule.enabled ? 'ENABLED' : 'PAUSED'}
