@@ -32,7 +32,7 @@ app.add_middleware(
 # CONFIGURABLE DETECTION & TRACKING THRESHOLDS
 # =========================================================================
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
-SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "true").lower() == "true"
+SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "false").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
 FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.55"))
