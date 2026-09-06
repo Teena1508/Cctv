@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "dev": "npm --prefix dashboard run dev"
+    "backend": ".venv/bin/python cctv-backend/main.py",
+    "dev": "nohup .venv/bin/python cctv-backend/main.py > backend.log 2>&1 & npm --prefix dashboard run dev"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

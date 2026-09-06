@@ -282,7 +282,7 @@ export default function App() {
     restrictedRulesRef.current = updated;
     try {
       localStorage.setItem('restricted_rules', JSON.stringify(updated));
-    } catch (err) {}
+    } catch (err) { }
   };
 
   const handleDeleteRule = (ruleId) => {
@@ -291,7 +291,7 @@ export default function App() {
     restrictedRulesRef.current = updated;
     try {
       localStorage.setItem('restricted_rules', JSON.stringify(updated));
-    } catch (err) {}
+    } catch (err) { }
   };
 
   // Camera stream states
@@ -349,7 +349,7 @@ export default function App() {
         setAiBackendLabel('ONLINE (BROWSER AI)');
       }
     };
-    
+
     checkBackend();
     const interval = setInterval(checkBackend, 5000);
     return () => clearInterval(interval);
@@ -359,7 +359,7 @@ export default function App() {
   const triggerGpsSync = () => {
     setGpsError(null);
     setLocationSource('ACQUIRING GPS...');
-    
+
     if (!('geolocation' in navigator)) {
       setLocationSource('STATIC NODE');
       setGpsError("Geolocation is not supported by your browser.");
@@ -379,7 +379,7 @@ export default function App() {
 
     const handleIpFallback = (err) => {
       console.warn("Browser GPS failed, trying IP-based geolocation fallback:", err);
-      
+
       let errorMsg = "GPS failed. Using IP fallback.";
       if (err.code === 1) {
         errorMsg = "GPS blocked. Please allow location permissions in your browser address bar.";
@@ -881,7 +881,7 @@ export default function App() {
             <div className="lg:col-span-8 flex flex-col gap-4">
               <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
                 <Radio className="w-4 h-4 text-blue-400" />
-                Primary Camera Feed (Fixed Widescreen 16:9 Landscape)
+                Primary Camera Feed
               </h2>
               <div className="bg-slate-950 border border-slate-900 rounded-2xl overflow-hidden p-2 flex flex-col items-center justify-center">
                 <CameraFeed
@@ -1317,11 +1317,10 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleToggleRule(rule.id)}
-                          className={`px-2 py-1 rounded text-[10px] font-bold cursor-pointer transition-all ${
-                            rule.enabled
+                          className={`px-2 py-1 rounded text-[10px] font-bold cursor-pointer transition-all ${rule.enabled
                               ? 'bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900'
                               : 'bg-slate-900 text-slate-500 border border-slate-800 hover:bg-slate-800'
-                          }`}
+                            }`}
                         >
                           {rule.enabled ? 'ENABLED' : 'PAUSED'}
                         </button>
