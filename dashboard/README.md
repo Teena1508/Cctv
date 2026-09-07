@@ -10,4 +10,4 @@ A web UI for the surveillance platform. Renders live camera feeds (incorporating
 
 ## Running the Dashboard
 1. Run `npm install` to install dependencies.
-2. Run `npm run dev` to start the frontend server on port `3000`.
+
