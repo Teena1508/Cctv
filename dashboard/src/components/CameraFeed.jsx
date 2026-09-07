@@ -902,11 +902,11 @@ export default function CameraFeed({
                     if (iou > 0.05) {
                         score += iou * 2.0;
                     }
-                    if (distRatio <= 2.2) {
-                        score += Math.max(0, 1.5 - distRatio * 0.6);
+                    if (distRatio <= 3.5) {
+                        score += Math.max(0, 2.0 - distRatio * 0.5);
                     }
                     if (labelA && labelB && labelA === labelB && !labelA.includes('UNAUTHORIZED')) {
-                        score += 0.5;
+                        score += 1.0;
                     }
                     return score;
                 };
@@ -935,7 +935,7 @@ export default function CameraFeed({
                             if (existing.type === det.type) {
                                 const iou = calcIoU(existing.bbox, det.bbox);
                                 const distRatio = calcCenterDistanceRatio(existing.bbox, det.bbox);
-                                if (iou > 0.18 || distRatio < 0.6) {
+                                if (iou > 0.35 || distRatio < 0.40) {
                                     suppress = true;
                                     break;
                                 }
@@ -977,12 +977,11 @@ export default function CameraFeed({
                 }
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Instant departure detection: 600ms (~0.6s) of true absence after leaving frame.
-                    // Continuous active spatial track updates keep presence fresh while in frame, enabling instant departure alerts as soon as subject leaves.
+                    // Departure detection: 800ms of true absence after leaving frame.
                     const isScanInFlight = isScanningFaceRef.current || isScanningPlateRef.current;
                     const absenceDuration = checkNow - presence.lastSeen;
 
-                    if (absenceDuration > 600 && !isScanInFlight) {
+                    if (absenceDuration > 800 && !isScanInFlight) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
@@ -1020,7 +1019,7 @@ export default function CameraFeed({
                             const distRatio = calcCenterDistanceRatio(track.bbox, det.bbox);
                             const iou = calcIoU(track.bbox, det.bbox);
 
-                            if (score >= 0.25 || iou >= 0.10 || distRatio <= 1.8) {
+                            if (score >= 0.15 || iou >= 0.05 || distRatio <= 3.5) {
                                 matchPairs.push({ score, dIdx, tIdx, det, track });
                             }
                         }
@@ -1061,7 +1060,7 @@ export default function CameraFeed({
                             if (tr.type !== det.type) return false;
                             const dRatio = calcCenterDistanceRatio(tr.bbox, det.bbox);
                             const iou = calcIoU(tr.bbox, det.bbox);
-                            return iou > 0.25 || dRatio < 0.7;
+                            return iou > 0.35 || dRatio < 0.40;
                         });
 
                         if (!isDuplicateOfUpdated) {
@@ -1080,17 +1079,17 @@ export default function CameraFeed({
                     }
                 });
 
-                // 4.4 Prune ghost tracks left behind by past motion & retain truly active unmatched tracks for max 300ms
+                // 4.4 Retain active unmatched tracks for up to 800ms to eliminate dropouts & false departures
                 existingTracks.forEach((track, tIdx) => {
                     if (!claimedTracks.has(tIdx)) {
-                        const isGhostOfMovedPerson = updatedTracks.some(tr => {
+                        const isDuplicateOfUpdated = updatedTracks.some(tr => {
                             if (tr.type !== track.type) return false;
                             const dRatio = calcCenterDistanceRatio(track.bbox, tr.bbox);
                             const iou = calcIoU(track.bbox, tr.bbox);
-                            return dRatio <= 2.2 || iou > 0.05 || (track.label === tr.label && !track.label.includes('UNAUTHORIZED'));
+                            return iou > 0.40 || dRatio < 0.40;
                         });
 
-                        if (!isGhostOfMovedPerson && (now - (track.lastSeen || now)) < 300) {
+                        if (!isDuplicateOfUpdated && (now - (track.lastSeen || now)) < 800) {
                             track.missedFrames = (track.missedFrames || 0) + 1;
                             updatedTracks.push(track);
                         }
@@ -1106,7 +1105,7 @@ export default function CameraFeed({
                         if (existing.type !== tr.type) return false;
                         const iou = calcIoU(existing.bbox, tr.bbox);
                         const dRatio = calcCenterDistanceRatio(existing.bbox, tr.bbox);
-                        return iou > 0.30 || dRatio < 0.70;
+                        return iou > 0.40 || dRatio < 0.40;
                     });
                     if (!isTooCloseToAnother) {
                         finalActiveTracks.push(tr);

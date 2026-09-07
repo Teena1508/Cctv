@@ -351,10 +351,10 @@ class TemporalTracker:
                     dist = math.sqrt((t_cx - d_cx)**2 + (t_cy - d_cy)**2)
                     norm_dist = dist / avg_size
 
-                    if iou >= 0.10 or norm_dist <= 1.8:
-                        score = (iou * 2.0) + max(0.0, 1.5 - norm_dist * 0.6)
+                    if iou >= 0.05 or norm_dist <= 3.5:
+                        score = (iou * 2.0) + max(0.0, 2.0 - norm_dist * 0.5)
                         if track["name"] == det_name and det_name != "UNAUTHORIZED PERSON":
-                            score += 0.5
+                            score += 1.0
                         candidates.append((score, iou, t_id, det_idx))
 
             # 2. Sort candidate assignments by descending score/IoU
