@@ -3,6 +3,7 @@ import json
 import base64
 import re
 import time
+import math
 import collections
 import threading
 import platform
@@ -334,18 +335,26 @@ class TemporalTracker:
         with self.lock:
             confirmed_matches = []
 
-            # 1. Build spatial overlap (IoU) candidates between existing tracks and new detections
+            # 1. Build spatial overlap & distance matching candidates between existing tracks and new detections
             candidates = []
             for det_idx, det in enumerate(detected_matches):
                 bbox = det["bbox"]
                 det_name = det["name"]
 
                 for t_id, track in self.tracks.items():
-                    iou = self.calculate_iou(bbox, track["last_bbox"])
-                    name_boost = 0.05 if (track["name"] == det_name or track["name"] == "UNAUTHORIZED PERSON") else 0.0
-                    score = iou + name_boost
+                    tb = track["last_bbox"]
+                    iou = self.calculate_iou(bbox, tb)
 
-                    if iou >= 0.15:
+                    t_cx, t_cy = (tb[0] + tb[2]) / 2.0, (tb[1] + tb[3]) / 2.0
+                    d_cx, d_cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
+                    avg_size = max(30.0, (tb[2]-tb[0] + tb[3]-tb[1] + bbox[2]-bbox[0] + bbox[3]-bbox[1]) / 4.0)
+                    dist = math.sqrt((t_cx - d_cx)**2 + (t_cy - d_cy)**2)
+                    norm_dist = dist / avg_size
+
+                    if iou >= 0.10 or norm_dist <= 1.8:
+                        score = (iou * 2.0) + max(0.0, 1.5 - norm_dist * 0.6)
+                        if track["name"] == det_name and det_name != "UNAUTHORIZED PERSON":
+                            score += 0.5
                         candidates.append((score, iou, t_id, det_idx))
 
             # 2. Sort candidate assignments by descending score/IoU

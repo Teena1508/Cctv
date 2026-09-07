@@ -879,6 +879,38 @@ export default function CameraFeed({
                     return interArea / (boxAArea + boxBArea - interArea + 1e-6);
                 };
 
+                const calcCenterDistanceRatio = (boxA, boxB) => {
+                    if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 999;
+                    const cAx = (boxA[0] + boxA[2]) / 2;
+                    const cAy = (boxA[1] + boxA[3]) / 2;
+                    const cBx = (boxB[0] + boxB[2]) / 2;
+                    const cBy = (boxB[1] + boxB[3]) / 2;
+                    const wA = boxA[2] - boxA[0];
+                    const hA = boxA[3] - boxA[1];
+                    const wB = boxB[2] - boxB[0];
+                    const hB = boxB[3] - boxB[1];
+                    const avgDim = Math.max(30, (wA + hA + wB + hB) / 4);
+                    const dist = Math.hypot(cAx - cBx, cAy - cBy);
+                    return dist / avgDim;
+                };
+
+                const calcMatchScore = (boxA, boxB, labelA, labelB) => {
+                    const iou = calcIoU(boxA, boxB);
+                    const distRatio = calcCenterDistanceRatio(boxA, boxB);
+                    
+                    let score = 0;
+                    if (iou > 0.05) {
+                        score += iou * 2.0;
+                    }
+                    if (distRatio <= 2.2) {
+                        score += Math.max(0, 1.5 - distRatio * 0.6);
+                    }
+                    if (labelA && labelB && labelA === labelB && !labelA.includes('UNAUTHORIZED')) {
+                        score += 0.5;
+                    }
+                    return score;
+                };
+
                 if (newDetections.length > 1) {
                     const sortedDetections = [...newDetections].sort((a, b) => {
                         const aIsTarget = a.label && !a.label.includes('UNAUTHORIZED') && !a.label.includes('UNKNOWN');
@@ -902,7 +934,8 @@ export default function CameraFeed({
                         for (const existing of nmsFiltered) {
                             if (existing.type === det.type) {
                                 const iou = calcIoU(existing.bbox, det.bbox);
-                                if (iou > 0.18) {
+                                const distRatio = calcCenterDistanceRatio(existing.bbox, det.bbox);
+                                if (iou > 0.18 || distRatio < 0.6) {
                                     suppress = true;
                                     break;
                                 }
@@ -974,71 +1007,116 @@ export default function CameraFeed({
                     }
                 }
 
-                // --- 4. TEMPORAL TRACK ASSOCIATION & HYSTERESIS GRACE PERIOD ---
+                // --- 4. TEMPORAL TRACK ASSOCIATION & ACTIVE TRACK MAINTENANCE ---
                 const now = Date.now();
                 const existingTracks = activeDetectionsRef.current || [];
 
-                const updatedTracks = [...existingTracks];
-                const claimedTrackIndices = new Set();
-
-                newDetections.forEach((det) => {
-                    let bestTrackIdx = -1;
-                    let maxIoU = 0.0;
-
-                    // 1. First priority: Spatial overlap (IoU >= 0.15) to track multiple distinct people independently
-                    updatedTracks.forEach((track, tIdx) => {
-                        if (!claimedTrackIndices.has(tIdx) && track.type === det.type) {
+                // 4.1 Compute score matrix for track-detection pairing
+                const matchPairs = [];
+                newDetections.forEach((det, dIdx) => {
+                    existingTracks.forEach((track, tIdx) => {
+                        if (track.type === det.type) {
+                            const score = calcMatchScore(track.bbox, det.bbox, track.label, det.label);
+                            const distRatio = calcCenterDistanceRatio(track.bbox, det.bbox);
                             const iou = calcIoU(track.bbox, det.bbox);
-                            if (iou >= 0.15 && iou > maxIoU) {
-                                maxIoU = iou;
-                                bestTrackIdx = tIdx;
+
+                            if (score >= 0.25 || iou >= 0.10 || distRatio <= 1.8) {
+                                matchPairs.push({ score, dIdx, tIdx, det, track });
                             }
                         }
                     });
+                });
 
-                    // 2. Second priority: Specific named target match (e.g. FACE: John Doe) if IoU is < 0.15
-                    if (bestTrackIdx === -1 && !det.label.includes('UNAUTHORIZED PERSON')) {
-                        updatedTracks.forEach((track, tIdx) => {
-                            if (!claimedTrackIndices.has(tIdx) && track.type === det.type && track.label === det.label) {
-                                bestTrackIdx = tIdx;
-                            }
-                        });
-                    }
+                // Sort pairs by highest match score first
+                matchPairs.sort((a, b) => b.score - a.score);
 
-                    if (bestTrackIdx >= 0) {
-                        // Update matched track while preserving smoothBox for smooth continuous rendering!
-                        claimedTrackIndices.add(bestTrackIdx);
-                        const matchTrack = updatedTracks[bestTrackIdx];
-                        matchTrack.bbox = [...det.bbox];
-                        // Protect named target tracks from being downgraded to UNAUTHORIZED PERSON by noisy candidate crops!
-                        if (!det.label.includes('UNAUTHORIZED PERSON') || matchTrack.label.includes('UNAUTHORIZED PERSON')) {
-                            matchTrack.label = det.label;
+                const claimedDets = new Set();
+                const claimedTracks = new Set();
+                const updatedTracks = [];
+
+                // 4.2 Assign best candidate matches to existing tracks (1 box per moving face!)
+                for (const pair of matchPairs) {
+                    if (!claimedDets.has(pair.dIdx) && !claimedTracks.has(pair.tIdx)) {
+                        claimedDets.add(pair.dIdx);
+                        claimedTracks.add(pair.tIdx);
+
+                        const matchTrack = pair.track;
+                        matchTrack.bbox = [...pair.det.bbox];
+                        if (!pair.det.label.includes('UNAUTHORIZED PERSON') || matchTrack.label.includes('UNAUTHORIZED PERSON')) {
+                            matchTrack.label = pair.det.label;
                         }
-                        matchTrack.type = det.type;
-                        matchTrack.confidence = det.confidence;
+                        matchTrack.type = pair.det.type;
+                        matchTrack.confidence = pair.det.confidence;
                         matchTrack.lastSeen = now;
-                    } else {
-                        // Create a NEW distinct track for unmatched detection!
-                        updatedTracks.push({
-                            id: `${det.type}_${det.label}_${Math.random().toString(36).substring(2, 6)}`,
-                            type: det.type,
-                            label: det.label,
-                            bbox: [...det.bbox],
-                            smoothBox: [...det.bbox],
-                            confidence: det.confidence,
-                            lastSeen: now,
-                            firstSeen: now
+                        matchTrack.missedFrames = 0;
+
+                        updatedTracks.push(matchTrack);
+                    }
+                }
+
+                // 4.3 Create new distinct tracks ONLY for genuinely unmatched detections (e.g. separate person entering frame)
+                newDetections.forEach((det, dIdx) => {
+                    if (!claimedDets.has(dIdx)) {
+                        const isDuplicateOfUpdated = updatedTracks.some(tr => {
+                            if (tr.type !== det.type) return false;
+                            const dRatio = calcCenterDistanceRatio(tr.bbox, det.bbox);
+                            const iou = calcIoU(tr.bbox, det.bbox);
+                            return iou > 0.25 || dRatio < 0.7;
                         });
-                        claimedTrackIndices.add(updatedTracks.length - 1);
+
+                        if (!isDuplicateOfUpdated) {
+                            updatedTracks.push({
+                                id: `${det.type}_${det.label}_${Math.random().toString(36).substring(2, 6)}`,
+                                type: det.type,
+                                label: det.label,
+                                bbox: [...det.bbox],
+                                smoothBox: [...det.bbox],
+                                confidence: det.confidence,
+                                lastSeen: now,
+                                firstSeen: now,
+                                missedFrames: 0
+                            });
+                        }
                     }
                 });
 
-                // Hysteresis grace period: retain active tracks for 1000ms of inactivity to eliminate box drop-out & flickering
-                const activeTracks = updatedTracks.filter(t => (now - (t.lastSeen || now)) < 1000);
-                activeDetectionsRef.current = activeTracks;
+                // 4.4 Prune ghost tracks left behind by past motion & retain truly active unmatched tracks for max 300ms
+                existingTracks.forEach((track, tIdx) => {
+                    if (!claimedTracks.has(tIdx)) {
+                        const isGhostOfMovedPerson = updatedTracks.some(tr => {
+                            if (tr.type !== track.type) return false;
+                            const dRatio = calcCenterDistanceRatio(track.bbox, tr.bbox);
+                            const iou = calcIoU(track.bbox, tr.bbox);
+                            return dRatio <= 2.2 || iou > 0.05 || (track.label === tr.label && !track.label.includes('UNAUTHORIZED'));
+                        });
 
-                if (activeTracks.length > 0) {
-                    const topTrack = activeTracks.find(t => t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER')) || activeTracks[0];
+                        if (!isGhostOfMovedPerson && (now - (track.lastSeen || now)) < 300) {
+                            track.missedFrames = (track.missedFrames || 0) + 1;
+                            updatedTracks.push(track);
+                        }
+                    }
+                });
+
+                // 4.5 Spatial Deduplication across active tracks (Ensure distinct separate rectangles for diff people)
+                const finalActiveTracks = [];
+                updatedTracks.sort((a, b) => (b.lastSeen - a.lastSeen) || (b.confidence - a.confidence));
+
+                for (const tr of updatedTracks) {
+                    const isTooCloseToAnother = finalActiveTracks.some(existing => {
+                        if (existing.type !== tr.type) return false;
+                        const iou = calcIoU(existing.bbox, tr.bbox);
+                        const dRatio = calcCenterDistanceRatio(existing.bbox, tr.bbox);
+                        return iou > 0.30 || dRatio < 0.70;
+                    });
+                    if (!isTooCloseToAnother) {
+                        finalActiveTracks.push(tr);
+                    }
+                }
+
+                activeDetectionsRef.current = finalActiveTracks;
+
+                if (finalActiveTracks.length > 0) {
+                    const topTrack = finalActiveTracks.find(t => t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER')) || finalActiveTracks[0];
                     if (topTrack.label.includes('UNAUTHORIZED') || topTrack.label.includes('INTRUDER')) {
                         setLastMatch('INTRUDER DETECTED');
                     } else if (topTrack.label.includes('PLATE:')) {
