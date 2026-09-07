@@ -469,6 +469,9 @@ export default function CameraFeed({
                     targetH = Math.round(height * scale);
                 }
 
+                const scaleX = width / Math.max(1, targetW);
+                const scaleY = height / Math.max(1, targetH);
+
                 if (sharedFrameCanvas.width !== targetW || sharedFrameCanvas.height !== targetH) {
                     sharedFrameCanvas.width = targetW;
                     sharedFrameCanvas.height = targetH;
@@ -481,7 +484,7 @@ export default function CameraFeed({
                 ctx.imageSmoothingEnabled = true;
                 ctx.imageSmoothingQuality = 'medium';
                 ctx.drawImage(mediaSource, 0, 0, targetW, targetH);
-                sharedFrameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.80);
+                sharedFrameCanvas.toBlob((blob) => resolve({ blob, scaleX, scaleY }), 'image/jpeg', 0.80);
             } catch (e) {
                 resolve(null);
             }
@@ -524,12 +527,13 @@ export default function CameraFeed({
                 isProcessingFrame = true;
                 setIsScanning(true);
 
-                const blob = await captureFrameBlob(mediaSource, srcWidth, srcHeight);
-                if (!blob) {
+                const captureRes = await captureFrameBlob(mediaSource, srcWidth, srcHeight);
+                if (!captureRes || !captureRes.blob) {
                     isProcessingFrame = false;
                     setIsScanning(false);
                     return;
                 }
+                const { blob, scaleX, scaleY } = captureRes;
 
                 frameCounterRef.current += 1;
                 const currentFrameId = frameCounterRef.current;
@@ -575,10 +579,16 @@ export default function CameraFeed({
                                         setLastMatch(`PLATE: ${matched}`);
 
                                         if (item.bbox) {
+                                            const unscaledBbox = [
+                                                Math.round(item.bbox[0] * scaleX),
+                                                Math.round(item.bbox[1] * scaleY),
+                                                Math.round(item.bbox[2] * scaleX),
+                                                Math.round(item.bbox[3] * scaleY)
+                                            ];
                                             newDetections.push({
                                                 type: 'PLATE',
                                                 label: `PLATE: ${matched}`,
-                                                bbox: item.bbox,
+                                                bbox: unscaledBbox,
                                                 confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
                                                 timestamp: currentTimestamp
                                             });
@@ -655,10 +665,16 @@ export default function CameraFeed({
                                         setLastMatch(isUnauthorized ? 'INTRUDER DETECTED' : `TARGET: ${targetName}`);
 
                                         if (face.bbox) {
+                                            const unscaledBbox = [
+                                                Math.round(face.bbox[0] * scaleX),
+                                                Math.round(face.bbox[1] * scaleY),
+                                                Math.round(face.bbox[2] * scaleX),
+                                                Math.round(face.bbox[3] * scaleY)
+                                            ];
                                             newDetections.push({
                                                 type: 'FACE',
                                                 label: isUnauthorized ? `FACE: UNAUTHORIZED PERSON` : `FACE: ${targetName}`,
-                                                bbox: face.bbox,
+                                                bbox: unscaledBbox,
                                                 confidence: confPercent,
                                                 timestamp: currentTimestamp
                                             });
@@ -1067,10 +1083,10 @@ export default function CameraFeed({
                             if (!det.smoothBox) {
                                 det.smoothBox = [...det.bbox];
                             } else {
-                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.30;
-                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.30;
-                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.30;
-                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.30;
+                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.65;
+                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.65;
+                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.65;
+                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.65;
                             }
 
                             const [x1, y1, x2, y2] = det.smoothBox;
