@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "build": "npm --prefix dashboard run build",
     "backend": ".venv/bin/python cctv-backend/main.py",
     "dev": "nohup .venv/bin/python cctv-backend/main.py > backend.log 2>&1 & npm --prefix dashboard run dev"
   },
