@@ -61,7 +61,7 @@ function getCropSkinRatio(imgSource, cropBox) {
             sharedSkinCanvas.width = sampleW;
             sharedSkinCanvas.height = sampleH;
         }
-        const ctx = sharedSkinCanvas.getContext('2d');
+        const ctx = sharedSkinCanvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return 0;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
@@ -113,7 +113,7 @@ function hasFaceStructure(imgSource, cropBox) {
             sharedStructureCanvas.width = sampleW;
             sharedStructureCanvas.height = sampleH;
         }
-        const ctx = sharedStructureCanvas.getContext('2d');
+        const ctx = sharedStructureCanvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return false;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
@@ -164,7 +164,7 @@ function getCanvasImageSignature(imgSource, targetWidth = 24, targetHeight = 24,
             sharedSignatureCanvas.width = targetWidth;
             sharedSignatureCanvas.height = targetHeight;
         }
-        const ctx = sharedSignatureCanvas.getContext('2d');
+        const ctx = sharedSignatureCanvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return null;
 
         const srcW = imgSource.videoWidth || imgSource.naturalWidth || imgSource.width || 640;
@@ -459,17 +459,29 @@ export default function CameraFeed({
                     resolve(null);
                     return;
                 }
-                if (sharedFrameCanvas.width !== width || sharedFrameCanvas.height !== height) {
-                    sharedFrameCanvas.width = width;
-                    sharedFrameCanvas.height = height;
+                // Downscale frame for fast AI scanning (max 640px) - Windows optimized canvas performance!
+                const maxDim = 640;
+                let targetW = width;
+                let targetH = height;
+                if (width > maxDim || height > maxDim) {
+                    const scale = maxDim / Math.max(width, height);
+                    targetW = Math.round(width * scale);
+                    targetH = Math.round(height * scale);
                 }
-                const ctx = sharedFrameCanvas.getContext('2d');
+
+                if (sharedFrameCanvas.width !== targetW || sharedFrameCanvas.height !== targetH) {
+                    sharedFrameCanvas.width = targetW;
+                    sharedFrameCanvas.height = targetH;
+                }
+                const ctx = sharedFrameCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
                 if (!ctx) {
                     resolve(null);
                     return;
                 }
-                ctx.drawImage(mediaSource, 0, 0, width, height);
-                sharedFrameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.90);
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'medium';
+                ctx.drawImage(mediaSource, 0, 0, targetW, targetH);
+                sharedFrameCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.80);
             } catch (e) {
                 resolve(null);
             }

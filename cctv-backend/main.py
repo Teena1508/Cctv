@@ -5,15 +5,40 @@ import re
 import time
 import collections
 import threading
+import platform
 from fastapi import FastAPI, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+
+# Windows CPU & Multi-Thread Optimization Parameters
+IS_WINDOWS = platform.system().lower() == "windows"
+
+# Limit thread contention for ONNX Runtime / OpenMP / PyTorch on Windows
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
+
 import cv2
+try:
+    cv2.setNumThreads(2)
+except Exception:
+    pass
+
 import numpy as np
+
+try:
+    import torch
+    torch.set_num_threads(2)
+except Exception:
+    pass
+
 try:
     import easyocr
 except ImportError:
     easyocr = None
+
 import insightface
 from insightface.app import FaceAnalysis
 
@@ -50,9 +75,11 @@ PLATE_WINDOW_M = int(os.getenv("PLATE_WINDOW_M", "6"))         # Sliding window 
 # 1. Initialize EasyOCR Reader
 print("[ANPR Engine] Loading EasyOCR Engine...")
 try:
-    import easyocr
-    reader = easyocr.Reader(['en'], gpu=False)
-    print("[ANPR Engine] EasyOCR Engine Ready for Digits & Plates!")
+    if easyocr is not None:
+        reader = easyocr.Reader(['en'], gpu=False, download_enabled=True)
+        print("[ANPR Engine] EasyOCR Engine Ready for Digits & Plates!")
+    else:
+        reader = None
 except Exception as e:
     print(f"[ANPR Engine] EasyOCR optional fallback active: {e}")
     reader = None
@@ -89,32 +116,37 @@ class SmartFaceAnalyzer:
             self.init_fallback()
 
     def try_init_real(self):
-        try:
-            print("[SmartFaceAnalyzer] Initializing InsightFace Buffalo_L model...")
-            real = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-            real.prepare(ctx_id=0, det_size=(640, 640))
-            self.real_analyzer = real
-            print("[SmartFaceAnalyzer] Loaded InsightFace model successfully.")
-        except Exception as e:
-            print(f"[SmartFaceAnalyzer] Could not load InsightFace model directly: {e}. Trying buffalo_sc...")
+        det_sz = (480, 480) if IS_WINDOWS else (640, 640)
+        models_to_try = ['buffalo_sc', 'buffalo_l'] if IS_WINDOWS else ['buffalo_l', 'buffalo_sc']
+        for model_name in models_to_try:
             try:
-                real = FaceAnalysis(name='buffalo_sc', providers=['CPUExecutionProvider'])
-                real.prepare(ctx_id=0, det_size=(640, 640))
+                print(f"[SmartFaceAnalyzer] Initializing InsightFace {model_name} model (det_size={det_sz})...")
+                real = FaceAnalysis(name=model_name, providers=['CPUExecutionProvider'])
+                real.prepare(ctx_id=0, det_size=det_sz)
                 self.real_analyzer = real
-                print("[SmartFaceAnalyzer] Loaded InsightFace buffalo_sc successfully.")
-            except Exception as ex:
-                print(f"[SmartFaceAnalyzer] InsightFace initialization failed: {ex}")
+                print(f"[SmartFaceAnalyzer] Loaded InsightFace {model_name} model successfully.")
+                break
+            except Exception as e:
+                print(f"[SmartFaceAnalyzer] Could not load InsightFace {model_name}: {e}")
                 self.real_analyzer = None
 
     def init_fallback(self):
         print("[SmartFaceAnalyzer] Initializing OpenCV Haar Cascade face detector fallback...")
         try:
-            if hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data'):
-                self.fallback_analyzer = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            cascade_path = None
+            if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
+                cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+            
+            if cascade_path and os.path.exists(cascade_path):
+                self.fallback_analyzer = cv2.CascadeClassifier(cascade_path)
+            elif hasattr(cv2, 'CascadeClassifier'):
+                self.fallback_analyzer = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
             else:
                 self.fallback_analyzer = None
-        except Exception:
+        except Exception as e:
+            print(f"[SmartFaceAnalyzer] Haar cascade fallback error: {e}")
             self.fallback_analyzer = None
+
         if self.fallback_analyzer is None or getattr(self.fallback_analyzer, 'empty', lambda: True)():
             print("[SmartFaceAnalyzer] WARNING: Haar Cascade unavailable or empty.")
             self.fallback_analyzer = None
