@@ -61,11 +61,11 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "false").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
-FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.58"))
-FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.38"))
-PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "2"))      # Require N out of M frames to confirm presence
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.45"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.33"))
+PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "1"))      # Require N out of M frames to confirm presence
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
-PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "2"))       # K consecutive absent frames to mark absent
+PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
 
 
 # License Plate ANPR Thresholds
@@ -86,14 +86,14 @@ except Exception as e:
     reader = None
 
 def is_valid_face_crop(img, x, y, w, h):
-    """Verifies that a detected bounding box represents a real human face by checking geometry and skin presence."""
+    """Verifies that a detected bounding box represents a real human face by checking geometry."""
     if img is None:
         return False
     img_h, img_w = img.shape[:2]
-    if w < 40 or h < 40 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
+    if w < 20 or h < 20 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
         return False
     aspect = float(w) / float(h)
-    if aspect < 0.65 or aspect > 1.35:
+    if aspect < 0.40 or aspect > 1.85:
         return False
 
     crop = img[y:y+h, x:x+w]
@@ -103,7 +103,7 @@ def is_valid_face_crop(img, x, y, w, h):
         ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
         mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
         skin_ratio = np.sum(mask > 0) / float(mask.size)
-        if skin_ratio < 0.18:
+        if skin_ratio < 0.05:
             return False
     return True
 
@@ -401,11 +401,8 @@ class TemporalTracker:
                 updated_track_ids.add(best_track_id)
 
                 hits = sum(track["window"])
-                # Instant confirmation on 1st frame for enrolled targets!
-                if name != "UNAUTHORIZED PERSON":
-                    track["status"] = "CONFIRMED_PRESENT"
-                else:
-                    track["status"] = "CONFIRMED_PRESENT" if hits >= PERSON_CONFIRM_N else "DETECTED"
+                # Instant confirmation on 1st frame for all face detections!
+                track["status"] = "CONFIRMED_PRESENT"
 
                 confirmed_matches.append({
                     "name": track["name"],
@@ -436,9 +433,11 @@ class TemporalTracker:
                 "timestamp": timestamp
             })
 
-    def get_plate_consensus(self):
+    def get_plate_consensus(self, max_age_seconds=4.0):
         with self.lock:
-            if not self.plate_history:
+            now = time.time()
+            fresh_items = [item for item in self.plate_history if (now - item.get("timestamp", now)) <= max_age_seconds]
+            if not fresh_items:
                 return None
 
             counts = collections.defaultdict(int)
@@ -446,7 +445,7 @@ class TemporalTracker:
             latest_bbox = {}
             raw_map = {}
 
-            for item in self.plate_history:
+            for item in fresh_items:
                 norm = item["norm"]
                 counts[norm] += 1
                 total_conf[norm] += item["conf"]
@@ -457,7 +456,8 @@ class TemporalTracker:
             freq = counts[best_norm]
             avg_conf = total_conf[best_norm] / freq
 
-            if avg_conf >= PLATE_MIN_CONF:
+            # Require valid plate length (>= 4) and confidence
+            if len(best_norm) >= 4 and avg_conf >= 0.22:
                 return {
                     "text": best_norm,
                     "raw_text": raw_map[best_norm],
@@ -507,6 +507,11 @@ def locate_license_plate_candidates(frame):
                     "bbox": [x1, y1, x2, y2],
                     "crop": crop
                 })
+    if not candidates:
+        candidates.append({
+            "bbox": [0, 0, w, h],
+            "crop": frame
+        })
     return candidates
 
 def preprocess_plate_crop(crop):
@@ -517,14 +522,19 @@ def preprocess_plate_crop(crop):
     if h < 10 or w < 25:
         return None
 
-    target_h = 60
+    # If crop is already high resolution (>= 120px height), preserve resolution for sharp text recognition
+    if h >= 120:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        return clahe.apply(gray)
+
+    target_h = 80
     scale = target_h / float(h)
     target_w = max(120, int(w * scale))
 
     resized = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
 
-    # Contrast adjustment (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
     denoised = cv2.bilateralFilter(enhanced, 7, 50, 50)
@@ -645,7 +655,6 @@ def scan_face(
             rx1, ry1, rx2, ry2 = int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3])
             rw, rh = rx2 - rx1, ry2 - ry1
 
-            # Strictly validate geometry, minimum size, aspect ratio, and skin features to eliminate false positive objects
             if not is_valid_face_crop(processed_frame, rx1, ry1, rw, rh):
                 continue
 
@@ -674,13 +683,12 @@ def scan_face(
 
                 if scores:
                     candidate_name, candidate_sim = scores[0]
-                    # Require 0.48 for deep embeddings and 0.68 for fallback Haar signatures to prevent wrong matches
-                    threshold = 0.68 if is_fallback else max(0.48, FACE_MATCH_SIM_THRESHOLD)
+                    threshold = 0.65 if is_fallback else FACE_MATCH_SIM_THRESHOLD
                     
                     margin_valid = True
-                    if len(scores) > 1:
+                    if len(scores) > 1 and not is_fallback:
                         second_name, second_sim = scores[1]
-                        if (candidate_sim - second_sim) < 0.05 and candidate_name != second_name:
+                        if candidate_sim < 0.45 and second_sim > 0.20 and (candidate_sim - second_sim) < 0.03 and candidate_name != second_name:
                             margin_valid = False
 
                     if candidate_sim >= threshold and margin_valid:
@@ -696,23 +704,16 @@ def scan_face(
                     "confidence": calibrated_conf,
                     "bbox": orig_bbox
                 })
-            elif det_score is not None and det_score >= 0.70 and is_valid_face_crop(frame, orig_bbox[0], orig_bbox[1], orig_bbox[2]-orig_bbox[0], orig_bbox[3]-orig_bbox[1]):
+            else:
                 # UN-ENROLLED PERSON / INTRUDER DETECTED
-                # If valid_targets exist and similarity to top target is near-threshold (>= 0.25), do not flag as UNAUTHORIZED
-                is_near_target = False
-                if valid_targets and 'scores' in locals() and scores:
-                    if scores[0][1] >= 0.25:
-                        is_near_target = True
-
-                if not is_near_target:
-                    unauth_conf = float(det_score)
-                    person_conf_log = unauth_conf
-                    person_bbox_log = orig_bbox
-                    raw_matches.append({
-                        "name": "UNAUTHORIZED PERSON",
-                        "confidence": unauth_conf,
-                        "bbox": orig_bbox
-                    })
+                unauth_conf = float(det_score) if det_score is not None else 0.88
+                person_conf_log = unauth_conf
+                person_bbox_log = orig_bbox
+                raw_matches.append({
+                    "name": "UNAUTHORIZED PERSON",
+                    "confidence": unauth_conf,
+                    "bbox": orig_bbox
+                })
 
         # Apply Temporal Confirmation Tracker
         confirmed_matches = tracker.update_face_tracks(frame_id, raw_matches)
@@ -765,16 +766,28 @@ def scan_plate(
             if preprocessed is None:
                 continue
 
-            ocr_results = reader.readtext(preprocessed)
-            for (local_bbox, text, prob) in ocr_results:
-                if prob >= 0.25:
+            ocr_results = reader.readtext(preprocessed) if reader is not None else []
+            for (local_pts, text, prob) in ocr_results:
+                if prob >= 0.20:
                     norm_text = normalize_indian_plate(text)
-                    if len(norm_text) >= 3:
+                    # Require minimum 4 chars containing both letters and numbers
+                    if len(norm_text) >= 4 and re.search(r'[0-9]', norm_text) and re.search(r'[A-Z]', norm_text):
+                        if bbox == [0, 0, w, h] and len(local_pts) == 4:
+                            pts = np.array(local_pts, dtype=np.int32)
+                            lx1, ly1 = int(np.min(pts[:, 0])), int(np.min(pts[:, 1]))
+                            lx2, ly2 = int(np.max(pts[:, 0])), int(np.max(pts[:, 1]))
+                            prep_h, prep_w = preprocessed.shape[:2]
+                            sc_y = h / float(prep_h)
+                            sc_x = w / float(prep_w)
+                            actual_bbox = [max(0, int(lx1 * sc_x)), max(0, int(ly1 * sc_y)), min(w, int(lx2 * sc_x)), min(h, int(ly2 * sc_y))]
+                        else:
+                            actual_bbox = bbox
+
                         ocr_raw_log = text
                         ocr_norm_log = norm_text
                         ocr_conf_log = float(prob)
-                        plate_bbox_log = bbox
-                        tracker.add_plate_observation(text, norm_text, float(prob), bbox, req_ts)
+                        plate_bbox_log = actual_bbox
+                        tracker.add_plate_observation(text, norm_text, float(prob), actual_bbox, req_ts)
 
         consensus_plate = tracker.get_plate_consensus()
         results = [consensus_plate] if consensus_plate else []

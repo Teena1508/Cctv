@@ -25,15 +25,15 @@ res_face = requests.post(f"{BACKEND_URL}/api/scan-face", files=files, data=data)
 print(f"[2] Empty Frame Scan Face Result: {res_face}")
 assert len(res_face["matches"]) == 0, "Empty scene should return 0 face matches!"
 
-# 3. Test Synthetic Person Face Registration & Temporal Tracking
-# Create synthetic face target portrait
-target_face_img = np.zeros((300, 300, 3), dtype=np.uint8) + 120
-cv2.circle(target_face_img, (150, 150), 80, (200, 200, 200), -1) # Head
-cv2.circle(target_face_img, (120, 120), 12, (20, 20, 20), -1)   # Left eye
-cv2.circle(target_face_img, (180, 120), 12, (20, 20, 20), -1)   # Right eye
-cv2.ellipse(target_face_img, (150, 180), (30, 15), 0, 0, 180, (20, 20, 20), 4) # Mouth
+# 3. Test Real Person Face Registration & Temporal Tracking
+target_face_img = cv2.imread('debug_frames/latest_debug.jpg')
+if target_face_img is None:
+    target_face_img = np.zeros((300, 300, 3), dtype=np.uint8)
+else:
+    target_face_img = cv2.resize(target_face_img, (640, 480))
 
-_, target_enc = cv2.imencode('.jpg', target_face_img)
+face_crop = target_face_img[100:300, 200:400]
+_, target_enc = cv2.imencode('.jpg', face_crop)
 import base64
 target_b64 = "data:image/jpeg;base64," + base64.b64encode(target_enc.tobytes()).decode()
 targets = [{"name": "TestSubject", "imageSrc": target_b64}]

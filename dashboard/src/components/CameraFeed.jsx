@@ -32,12 +32,15 @@ function isFuzzyPlateMatch(detectedStr, enrolledStr) {
     const d = detectedStr.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const e = enrolledStr.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (!d || !e) return false;
+    if (d.length < 4 || e.length < 3) return false;
 
-    if (d.includes(e) || e.includes(d)) return true;
+    if (d === e || d.includes(e)) return true;
+    if (e.includes(d) && d.length >= Math.max(4, e.length - 2)) return true;
 
     const normD = d.split('').map(normalizePlateChar).join('');
     const normE = e.split('').map(normalizePlateChar).join('');
-    if (normD.includes(normE) || normE.includes(normD)) return true;
+    if (normD === normE || normD.includes(normE)) return true;
+    if (normE.includes(normD) && normD.length >= Math.max(4, normE.length - 2)) return true;
 
     if (Math.abs(normD.length - normE.length) <= 2 && normE.length >= 4) {
         let diffs = 0;
@@ -534,7 +537,7 @@ export default function CameraFeed({
 
                 // Define parallel scanner tasks with AbortController & safe finally locks
                 const scanPlateTask = async () => {
-                    if (!plates || plates.length === 0 || isScanningPlateRef.current) return;
+                    if (isScanningPlateRef.current) return;
                     isScanningPlateRef.current = true;
                     
                     const controller = new AbortController();
@@ -564,11 +567,12 @@ export default function CameraFeed({
                                 data.results.forEach((item) => {
                                     if (!item) return;
                                     const rawDetected = item.text || '';
-                                    const matched = plates.find((plate) => isFuzzyPlateMatch(rawDetected, plate));
+                                    const matched = (plates && plates.length > 0) ? plates.find((plate) => isFuzzyPlateMatch(rawDetected, plate)) : null;
+                                    const displayLabel = matched ? matched : rawDetected;
 
-                                    if (matched) {
+                                    if (displayLabel) {
                                         const exactTime = formatExactTimestamp(new Date());
-                                        setLastMatch(`PLATE: ${matched}`);
+                                        setLastMatch(`PLATE: ${displayLabel}`);
 
                                         if (item.bbox) {
                                             const unscaledBbox = [
@@ -579,18 +583,18 @@ export default function CameraFeed({
                                             ];
                                             newDetections.push({
                                                 type: 'PLATE',
-                                                label: `PLATE: ${matched}`,
+                                                label: `PLATE: ${displayLabel}`,
                                                 bbox: unscaledBbox,
                                                 confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
                                                 timestamp: currentTimestamp
                                             });
                                         }
 
-                                        handlePresenceLifecycle(`PLATE_${matched}`, {
+                                        handlePresenceLifecycle(`PLATE_${displayLabel}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                            eventType: 'PLATE MATCH',
-                                            subject: matched,
-                                            details: `Target plate identified on ${cameraId}: ${rawDetected}`,
+                                            eventType: matched ? 'PLATE MATCH' : 'PLATE DETECTED',
+                                            subject: displayLabel,
+                                            details: `License plate identified on ${cameraId}: ${rawDetected}`,
                                             lat: activeLoc.lat,
                                             lng: activeLoc.lng,
                                             address: activeLoc.address,
@@ -598,7 +602,7 @@ export default function CameraFeed({
                                             cameraName: cameraName,
                                             timestamp: exactTime,
                                             confidence: item.confidence ? Math.round(item.confidence * 100) : 95,
-                                            severity: 'CRITICAL',
+                                            severity: matched ? 'CRITICAL' : 'INFO',
                                         });
                                     }
                                 });
@@ -1079,17 +1083,10 @@ export default function CameraFeed({
                     }
                 });
 
-                // 4.4 Retain active unmatched tracks for up to 800ms to eliminate dropouts & false departures
+                // 4.4 Hysteresis grace period: retain active tracks for 1200ms of inactivity to eliminate box drop-out & flickering
                 existingTracks.forEach((track, tIdx) => {
                     if (!claimedTracks.has(tIdx)) {
-                        const isDuplicateOfUpdated = updatedTracks.some(tr => {
-                            if (tr.type !== track.type) return false;
-                            const dRatio = calcCenterDistanceRatio(track.bbox, tr.bbox);
-                            const iou = calcIoU(track.bbox, tr.bbox);
-                            return iou > 0.40 || dRatio < 0.40;
-                        });
-
-                        if (!isDuplicateOfUpdated && (now - (track.lastSeen || now)) < 800) {
+                        if ((now - (track.lastSeen || now)) < 1200) {
                             track.missedFrames = (track.missedFrames || 0) + 1;
                             updatedTracks.push(track);
                         }
@@ -1161,10 +1158,10 @@ export default function CameraFeed({
                             if (!det.smoothBox) {
                                 det.smoothBox = [...det.bbox];
                             } else {
-                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.65;
-                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.65;
-                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.65;
-                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.65;
+                                det.smoothBox[0] += (det.bbox[0] - det.smoothBox[0]) * 0.40;
+                                det.smoothBox[1] += (det.bbox[1] - det.smoothBox[1]) * 0.40;
+                                det.smoothBox[2] += (det.bbox[2] - det.smoothBox[2]) * 0.40;
+                                det.smoothBox[3] += (det.bbox[3] - det.smoothBox[3]) * 0.40;
                             }
 
                             const [x1, y1, x2, y2] = det.smoothBox;
