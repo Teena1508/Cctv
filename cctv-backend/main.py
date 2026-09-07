@@ -39,7 +39,7 @@ FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.55"))
 FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.33"))
 PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "2"))      # Require N out of M frames to confirm presence
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
-PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
+PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "2"))       # K consecutive absent frames to mark absent
 
 
 # License Plate ANPR Thresholds

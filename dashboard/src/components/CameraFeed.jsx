@@ -290,6 +290,24 @@ export default function CameraFeed({
         const presenceMap = activePresenceMapRef.current;
         let presence = presenceMap.get(subjectKey);
 
+        // Alias & migration check:
+        // Prevent presence splitting when classification fluctuates slightly between target name and intruder
+        if (!presence) {
+            for (const [existingKey, existingPresence] of presenceMap.entries()) {
+                const isExistingFace = existingKey.startsWith('FACE_') || existingKey.startsWith('INTRUDER_');
+                const isNewFace = subjectKey.startsWith('FACE_') || subjectKey.startsWith('INTRUDER_');
+                if (isExistingFace && isNewFace) {
+                    presenceMap.delete(existingKey);
+                    existingPresence.subjectKey = subjectKey;
+                    existingPresence.subjectName = alertData.subject;
+                    existingPresence.lastSeen = now;
+                    presenceMap.set(subjectKey, existingPresence);
+                    presence = existingPresence;
+                    break;
+                }
+            }
+        }
+
         if (!presence) {
             // --- 1. SUBJECT ARRIVAL (ENTRY ALERT - FIRED ONCE) ---
             presence = {
@@ -320,6 +338,7 @@ export default function CameraFeed({
             // --- 2. CONTINUOUS DWELL IN FRAME ---
             // Subject is already present. Refresh lastSeen timestamp; NO repeated entry alerts while standing in frame!
             presence.lastSeen = now;
+            presence.subjectName = alertData.subject;
         }
     };
 
@@ -359,12 +378,12 @@ export default function CameraFeed({
         }
     }, [lastMatch]);
 
-    // Clear stale bounding box overlays after 1.5 seconds of no update (using lastSeen timestamp)
+    // Clear stale bounding box overlays after 2.5 seconds of no update (using lastSeen timestamp)
     useEffect(() => {
         const cleanupInterval = setInterval(() => {
             if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
                 const now = Date.now();
-                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || d.timestamp || now)) < 1500);
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 2500);
             }
         }, 500);
         return () => clearInterval(cleanupInterval);
@@ -878,10 +897,30 @@ export default function CameraFeed({
                 // --- 3. CHECK FOR DEPARTURES (SUBJECT WENT / LEFT CAMERA FEED) ---
                 const checkNow = Date.now();
                 const presenceMap = activePresenceMapRef.current;
+                const existingActiveTracks = activeDetectionsRef.current || [];
+
+                // Keep presence refreshed as long as active spatial detection boxes remain on screen
+                if (existingActiveTracks.length > 0) {
+                    for (const [subjKey, presence] of presenceMap.entries()) {
+                        if (subjKey.startsWith('FACE_') || subjKey.startsWith('INTRUDER_')) {
+                            if (existingActiveTracks.some(t => t.type === 'FACE')) {
+                                presence.lastSeen = checkNow;
+                            }
+                        } else if (subjKey.startsWith('PLATE_')) {
+                            if (existingActiveTracks.some(t => t.type === 'PLATE')) {
+                                presence.lastSeen = checkNow;
+                            }
+                        }
+                    }
+                }
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Fast responsive departure alert: 1.5 seconds (1500 ms) of absence triggers departure event
-                    if (checkNow - presence.lastSeen > 1500) {
+                    // Instant departure detection: 600ms (~0.6s) of true absence after leaving frame.
+                    // Continuous active spatial track updates keep presence fresh while in frame, enabling instant departure alerts as soon as subject leaves.
+                    const isScanInFlight = isScanningFaceRef.current || isScanningPlateRef.current;
+                    const absenceDuration = checkNow - presence.lastSeen;
+
+                    if (absenceDuration > 600 && !isScanInFlight) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
