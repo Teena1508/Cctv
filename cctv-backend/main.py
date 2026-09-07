@@ -60,8 +60,8 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "false").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
-FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.55"))
-FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.33"))
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.58"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.38"))
 PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "2"))      # Require N out of M frames to confirm presence
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
 PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "2"))       # K consecutive absent frames to mark absent
@@ -633,6 +633,13 @@ def scan_face(
                 continue
 
             raw_bbox = face.bbox.tolist() if hasattr(face.bbox, 'tolist') else list(face.bbox)
+            rx1, ry1, rx2, ry2 = int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3])
+            rw, rh = rx2 - rx1, ry2 - ry1
+
+            # Strictly validate geometry, minimum size, aspect ratio, and skin features to eliminate false positive objects
+            if not is_valid_face_crop(processed_frame, rx1, ry1, rw, rh):
+                continue
+
             orig_bbox = [
                 int(raw_bbox[0] / scale),
                 int(raw_bbox[1] / scale),
@@ -658,12 +665,13 @@ def scan_face(
 
                 if scores:
                     candidate_name, candidate_sim = scores[0]
-                    threshold = FACE_MATCH_SIM_THRESHOLD
+                    # Require 0.48 for deep embeddings and 0.68 for fallback Haar signatures to prevent wrong matches
+                    threshold = 0.68 if is_fallback else max(0.48, FACE_MATCH_SIM_THRESHOLD)
                     
                     margin_valid = True
-                    if len(scores) > 1 and not is_fallback:
+                    if len(scores) > 1:
                         second_name, second_sim = scores[1]
-                        if candidate_sim < 0.45 and second_sim > 0.20 and (candidate_sim - second_sim) < 0.03 and candidate_name != second_name:
+                        if (candidate_sim - second_sim) < 0.05 and candidate_name != second_name:
                             margin_valid = False
 
                     if candidate_sim >= threshold and margin_valid:

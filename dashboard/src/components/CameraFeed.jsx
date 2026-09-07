@@ -289,27 +289,19 @@ export default function CameraFeed({
         const now = Date.now();
         const presenceMap = activePresenceMapRef.current;
         let presence = presenceMap.get(subjectKey);
+        let isUpgradedTarget = false;
 
-        // Alias & migration check:
-        // Prevent presence splitting when classification fluctuates slightly between target name and intruder
-        if (!presence) {
-            for (const [existingKey, existingPresence] of presenceMap.entries()) {
-                const isExistingFace = existingKey.startsWith('FACE_') || existingKey.startsWith('INTRUDER_');
-                const isNewFace = subjectKey.startsWith('FACE_') || subjectKey.startsWith('INTRUDER_');
-                if (isExistingFace && isNewFace) {
-                    presenceMap.delete(existingKey);
-                    existingPresence.subjectKey = subjectKey;
-                    existingPresence.subjectName = alertData.subject;
-                    existingPresence.lastSeen = now;
-                    presenceMap.set(subjectKey, existingPresence);
-                    presence = existingPresence;
-                    break;
-                }
+        // If an intruder key exists and we just identified a named target match, upgrade intruder key to named target key
+        if (!presence && subjectKey.startsWith('FACE_')) {
+            const intruderKey = `INTRUDER_${cameraId}`;
+            if (presenceMap.has(intruderKey)) {
+                presenceMap.delete(intruderKey);
+                isUpgradedTarget = true;
             }
         }
 
-        if (!presence) {
-            // --- 1. SUBJECT ARRIVAL (ENTRY ALERT - FIRED ONCE) ---
+        if (!presence || isUpgradedTarget) {
+            // --- 1. SUBJECT ARRIVAL / RE-ENTRY (ENTRY ALERT - FIRED EVERY TIME ON ARRIVAL) ---
             presence = {
                 subjectKey,
                 subjectName: alertData.subject,
@@ -777,7 +769,7 @@ export default function CameraFeed({
                                         }
                                     }
 
-                                    if (bestMatch && maxScore >= 0.48) {
+                                    if (bestMatch && maxScore >= 0.68) {
                                         matchedTargetInFrame = true;
                                     }
 
@@ -797,7 +789,7 @@ export default function CameraFeed({
                                     const by2 = srcHeight * (crop.y + crop.h);
                                     const exactTime = formatExactTimestamp(new Date());
 
-                                    if (bestMatch && maxScore >= 0.48) {
+                                    if (bestMatch && maxScore >= 0.68) {
                                         const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
                                         const matchConfidence = Math.min(99, Math.max(88, Math.round((maxScore) * 100)));
@@ -825,11 +817,12 @@ export default function CameraFeed({
                                             severity: 'CRITICAL',
                                         });
                                     } else {
-                                        // Do not generate UNAUTHORIZED PERSON for synthetic grid crops if a target matched in frame or score is near-threshold (>= 0.25)
-                                        if (isSyntheticGrid && (matchedTargetInFrame || maxScore >= 0.25)) {
+                                        // NEVER generate UNAUTHORIZED PERSON for synthetic grid crops!
+                                        // Synthetic regions are only used for matching watchlist targets when offline.
+                                        if (isSyntheticGrid) {
                                             continue;
                                         }
-                                        if (!isSyntheticGrid && maxScore >= 0.25) {
+                                        if (maxScore >= 0.25) {
                                             continue;
                                         }
 
@@ -927,17 +920,25 @@ export default function CameraFeed({
                 const presenceMap = activePresenceMapRef.current;
                 const existingActiveTracks = activeDetectionsRef.current || [];
 
-                // Keep presence refreshed as long as active spatial detection boxes remain on screen
+                // Keep presence refreshed ONLY if that specific subject's active spatial detection box is on screen
                 if (existingActiveTracks.length > 0) {
                     for (const [subjKey, presence] of presenceMap.entries()) {
-                        if (subjKey.startsWith('FACE_') || subjKey.startsWith('INTRUDER_')) {
-                            if (existingActiveTracks.some(t => t.type === 'FACE')) {
-                                presence.lastSeen = checkNow;
+                        const isMatchedTrackActive = existingActiveTracks.some(t => {
+                            if (subjKey.startsWith('PLATE_')) {
+                                return t.type === 'PLATE' && (t.label.includes(presence.subjectName) || t.label.includes(subjKey.replace('PLATE_', '')));
                             }
-                        } else if (subjKey.startsWith('PLATE_')) {
-                            if (existingActiveTracks.some(t => t.type === 'PLATE')) {
-                                presence.lastSeen = checkNow;
+                            if (subjKey.startsWith('FACE_')) {
+                                const targetSubj = subjKey.replace('FACE_', '');
+                                return t.type === 'FACE' && (t.label.includes(presence.subjectName) || t.label.includes(targetSubj));
                             }
+                            if (subjKey.startsWith('INTRUDER_')) {
+                                return t.type === 'FACE' && (t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER'));
+                            }
+                            return false;
+                        });
+
+                        if (isMatchedTrackActive) {
+                            presence.lastSeen = checkNow;
                         }
                     }
                 }
