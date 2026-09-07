@@ -684,7 +684,9 @@ export default function CameraFeed({
                                     }
                                 }
 
+                                let isSyntheticGrid = false;
                                 if (candidateCrops.length === 0) {
+                                    isSyntheticGrid = true;
                                     const testRegions = [
                                         { x: 0.25, y: 0.10, w: 0.50, h: 0.65 },
                                         { x: 0.10, y: 0.10, w: 0.45, h: 0.60 },
@@ -698,14 +700,14 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                let matchedFaceInFrame = false;
+                                let matchedTargetInFrame = false;
+                                const cropEvaluations = [];
 
                                 for (const crop of candidateCrops) {
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
                                     if (skinRatio < 0.18) continue;
                                     if (!hasFaceStructure(mediaSource, crop)) continue;
 
-                                    matchedFaceInFrame = true;
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
                                     let bestMatch = null;
                                     let maxScore = -1.0;
@@ -728,16 +730,30 @@ export default function CameraFeed({
                                         }
                                     }
 
-                                    const exactTime = formatExactTimestamp(new Date());
+                                    if (bestMatch && maxScore >= 0.48) {
+                                        matchedTargetInFrame = true;
+                                    }
+
+                                    cropEvaluations.push({
+                                        crop,
+                                        skinRatio,
+                                        bestMatch,
+                                        maxScore
+                                    });
+                                }
+
+                                for (const evalItem of cropEvaluations) {
+                                    const { crop, bestMatch, maxScore } = evalItem;
                                     const bx1 = srcWidth * crop.x;
                                     const by1 = srcHeight * crop.y;
                                     const bx2 = srcWidth * (crop.x + crop.w);
                                     const by2 = srcHeight * (crop.y + crop.h);
+                                    const exactTime = formatExactTimestamp(new Date());
 
-                                    if (bestMatch && bestMatch.score >= 0.52) {
+                                    if (bestMatch && maxScore >= 0.48) {
                                         const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
-                                        const matchConfidence = Math.min(99, Math.max(88, Math.round((bestMatch.score) * 100)));
+                                        const matchConfidence = Math.min(99, Math.max(88, Math.round((maxScore) * 100)));
 
                                         newDetections.push({
                                             type: 'FACE',
@@ -762,6 +778,14 @@ export default function CameraFeed({
                                             severity: 'CRITICAL',
                                         });
                                     } else {
+                                        // Do not generate UNAUTHORIZED PERSON for synthetic grid crops if a target matched in frame or score is near-threshold (>= 0.25)
+                                        if (isSyntheticGrid && (matchedTargetInFrame || maxScore >= 0.25)) {
+                                            continue;
+                                        }
+                                        if (!isSyntheticGrid && maxScore >= 0.25) {
+                                            continue;
+                                        }
+
                                         const intruderLabel = 'UNAUTHORIZED PERSON';
                                         setLastMatch(`INTRUDER DETECTED`);
 
@@ -791,10 +815,6 @@ export default function CameraFeed({
                                         });
                                     }
                                 }
-
-                                if (!matchedFaceInFrame) {
-                                    // setLastMatch(null); handled by hysteresis logic below
-                                }
                             }
                         }
                     } catch (err) {
@@ -806,13 +826,62 @@ export default function CameraFeed({
 
                 await Promise.all([scanFaceTask(), scanPlateTask()]);
 
+                // --- 2.5 NON-MAXIMUM SUPPRESSION (NMS) & OVERLAP DEDUPLICATION ---
+                const calcIoU = (boxA, boxB) => {
+                    if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 0;
+                    const xA = Math.max(boxA[0], boxB[0]);
+                    const yA = Math.max(boxA[1], boxB[1]);
+                    const xB = Math.min(boxA[2], boxB[2]);
+                    const yB = Math.min(boxA[3], boxB[3]);
+                    const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+                    const boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]);
+                    const boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]);
+                    return interArea / (boxAArea + boxBArea - interArea + 1e-6);
+                };
+
+                if (newDetections.length > 1) {
+                    const sortedDetections = [...newDetections].sort((a, b) => {
+                        const aIsTarget = a.label && !a.label.includes('UNAUTHORIZED') && !a.label.includes('UNKNOWN');
+                        const bIsTarget = b.label && !b.label.includes('UNAUTHORIZED') && !b.label.includes('UNKNOWN');
+
+                        if (aIsTarget && !bIsTarget) return -1;
+                        if (!aIsTarget && bIsTarget) return 1;
+
+                        if ((b.confidence || 0) !== (a.confidence || 0)) {
+                            return (b.confidence || 0) - (a.confidence || 0);
+                        }
+
+                        const areaA = (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]);
+                        const areaB = (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]);
+                        return areaB - areaA;
+                    });
+
+                    const nmsFiltered = [];
+                    for (const det of sortedDetections) {
+                        let suppress = false;
+                        for (const existing of nmsFiltered) {
+                            if (existing.type === det.type) {
+                                const iou = calcIoU(existing.bbox, det.bbox);
+                                if (iou > 0.18) {
+                                    suppress = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!suppress) {
+                            nmsFiltered.push(det);
+                        }
+                    }
+                    newDetections = nmsFiltered;
+                }
+
                 // --- 3. CHECK FOR DEPARTURES (SUBJECT WENT / LEFT CAMERA FEED) ---
                 const checkNow = Date.now();
                 const presenceMap = activePresenceMapRef.current;
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Require 3.5 seconds (3500 ms) of sustained absence before considering a subject departed
-                    if (checkNow - presence.lastSeen > 3500) {
+                    // Fast responsive departure alert: 1.5 seconds (1500 ms) of absence triggers departure event
+                    if (checkNow - presence.lastSeen > 1500) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
@@ -840,18 +909,6 @@ export default function CameraFeed({
                 // --- 4. TEMPORAL TRACK ASSOCIATION & HYSTERESIS GRACE PERIOD ---
                 const now = Date.now();
                 const existingTracks = activeDetectionsRef.current || [];
-
-                const calcIoU = (boxA, boxB) => {
-                    if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 0;
-                    const xA = Math.max(boxA[0], boxB[0]);
-                    const yA = Math.max(boxA[1], boxB[1]);
-                    const xB = Math.min(boxA[2], boxB[2]);
-                    const yB = Math.min(boxA[3], boxB[3]);
-                    const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
-                    const boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]);
-                    const boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]);
-                    return interArea / (boxAArea + boxBArea - interArea + 1e-6);
-                };
 
                 const updatedTracks = [...existingTracks];
                 const claimedTrackIndices = new Set();
@@ -885,7 +942,10 @@ export default function CameraFeed({
                         claimedTrackIndices.add(bestTrackIdx);
                         const matchTrack = updatedTracks[bestTrackIdx];
                         matchTrack.bbox = [...det.bbox];
-                        matchTrack.label = det.label;
+                        // Protect named target tracks from being downgraded to UNAUTHORIZED PERSON by noisy candidate crops!
+                        if (!det.label.includes('UNAUTHORIZED PERSON') || matchTrack.label.includes('UNAUTHORIZED PERSON')) {
+                            matchTrack.label = det.label;
+                        }
                         matchTrack.type = det.type;
                         matchTrack.confidence = det.confidence;
                         matchTrack.lastSeen = now;
@@ -905,8 +965,8 @@ export default function CameraFeed({
                     }
                 });
 
-                // Hysteresis grace period: retain active tracks for 1200ms of inactivity to eliminate box drop-out & flickering
-                const activeTracks = updatedTracks.filter(t => (now - (t.lastSeen || now)) < 1200);
+                // Hysteresis grace period: retain active tracks for 1000ms of inactivity to eliminate box drop-out & flickering
+                const activeTracks = updatedTracks.filter(t => (now - (t.lastSeen || now)) < 1000);
                 activeDetectionsRef.current = activeTracks;
 
                 if (activeTracks.length > 0) {
@@ -927,7 +987,7 @@ export default function CameraFeed({
                 isProcessingFrame = false;
                 setIsScanning(false);
             }
-        }, 200);
+        }, 120);
 
         return () => clearInterval(scanInterval);
     }, [cameraId, cameraName, streamUrl]);
