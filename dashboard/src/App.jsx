@@ -194,17 +194,32 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [enrollStatus, setEnrollStatus] = useState({ loading: false, success: null, error: null });
 
-  // Restricted Zone & Off-Hours Security Rules state
+  // Restricted Zone & Off-Hours Security Rules state (Defaults to 24/7 Always-On)
   const [restrictedRules, setRestrictedRules] = useState(() => {
     const saved = safelyGetArray('restricted_rules');
-    if (saved.length > 0) return saved;
+    if (saved.length > 0) {
+      // Migrate legacy night-only default rules to 24/7 Always On if only night-only rules exist
+      const isNightOnly = saved.every(r => r.startTime === '22:00' && r.endTime === '06:00');
+      if (isNightOnly) {
+        return saved.map(r => ({
+          ...r,
+          id: 'RULE_PERIMETER_ALWAYS_ON',
+          name: '24/7 Always-On Security & Intrusion Monitor',
+          cameraId: 'ALL_CAMERAS',
+          startTime: '00:00',
+          endTime: '23:59',
+          enabled: true
+        }));
+      }
+      return saved;
+    }
     return [
       {
-        id: 'RULE_PERIMETER_NIGHT',
-        name: 'Night Perimeter & Off-Hours Lock',
-        cameraId: 'CAM_01',
-        startTime: '22:00',
-        endTime: '06:00',
+        id: 'RULE_PERIMETER_ALWAYS_ON',
+        name: '24/7 Always-On Security & Intrusion Monitor',
+        cameraId: 'ALL_CAMERAS',
+        startTime: '00:00',
+        endTime: '23:59',
         constraint: 'PERSON_OR_CAR',
         enabled: true
       }
@@ -213,9 +228,9 @@ export default function App() {
 
   const [ruleForm, setRuleForm] = useState({
     name: '',
-    cameraId: 'CAM_01',
-    startTime: '22:00',
-    endTime: '06:00',
+    cameraId: 'ALL_CAMERAS',
+    startTime: '00:00',
+    endTime: '23:59',
     constraint: 'PERSON_OR_CAR'
   });
   const [ruleStatus, setRuleStatus] = useState({ success: null, error: null });

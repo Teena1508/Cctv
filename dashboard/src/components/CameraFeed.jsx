@@ -90,13 +90,13 @@ function getCropSkinRatio(imgSource, cropBox) {
             const g = imgData[i * 4 + 1];
             const b = imgData[i * 4 + 2];
 
-            const isSkin = (r > 40 && g > 25 && b > 15 &&
-                (Math.max(r, g, b) - Math.min(r, g, b) > 12) &&
-                Math.abs(r - g) > 12 && r > g && r > b) ||
-                ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 77) &&
-                 (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 127) &&
-                 (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 133) &&
-                 (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 173));
+            const isSkin = (r > 30 && g > 20 && b > 10 &&
+                (Math.max(r, g, b) - Math.min(r, g, b) > 8) &&
+                r > b) ||
+                ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 65) &&
+                 (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 140) &&
+                 (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 120) &&
+                 (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 185));
 
             if (isSkin) skinPixels++;
         }
@@ -152,7 +152,7 @@ function hasFaceStructure(imgSource, cropBox) {
         }
         const stdDev = Math.sqrt(variance / lums.length);
 
-        return stdDev >= 0.038;
+        return stdDev >= 0.018;
     } catch (e) {
         return false;
     }
@@ -731,13 +731,15 @@ export default function CameraFeed({
                                 if (candidateCrops.length === 0) {
                                     isSyntheticGrid = true;
                                     const testRegions = [
-                                        { x: 0.25, y: 0.10, w: 0.50, h: 0.65 },
-                                        { x: 0.10, y: 0.10, w: 0.45, h: 0.60 },
-                                        { x: 0.45, y: 0.10, w: 0.45, h: 0.60 },
-                                        { x: 0.30, y: 0.05, w: 0.40, h: 0.55 },
+                                        { x: 0.05, y: 0.10, w: 0.45, h: 0.75 }, // Left person
+                                        { x: 0.25, y: 0.10, w: 0.50, h: 0.75 }, // Center person
+                                        { x: 0.50, y: 0.10, w: 0.45, h: 0.75 }, // Right person
+                                        { x: 0.15, y: 0.05, w: 0.40, h: 0.65 }, // Center-left upper
+                                        { x: 0.45, y: 0.05, w: 0.40, h: 0.65 }, // Center-right upper
+                                        { x: 0.10, y: 0.10, w: 0.80, h: 0.80 }, // Full frame
                                     ];
                                     for (const reg of testRegions) {
-                                        if (getCropSkinRatio(mediaSource, reg) >= 0.20 && hasFaceStructure(mediaSource, reg)) {
+                                        if (getCropSkinRatio(mediaSource, reg) >= 0.06 && hasFaceStructure(mediaSource, reg)) {
                                             candidateCrops.push(reg);
                                         }
                                     }
@@ -748,7 +750,7 @@ export default function CameraFeed({
 
                                 for (const crop of candidateCrops) {
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.18) continue;
+                                    if (skinRatio < 0.05) continue;
                                     if (!hasFaceStructure(mediaSource, crop)) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
@@ -821,11 +823,6 @@ export default function CameraFeed({
                                             severity: 'CRITICAL',
                                         });
                                     } else {
-                                        // NEVER generate UNAUTHORIZED PERSON for synthetic grid crops!
-                                        // Synthetic regions are only used for matching watchlist targets when offline.
-                                        if (isSyntheticGrid) {
-                                            continue;
-                                        }
                                         if (maxScore >= 0.25) {
                                             continue;
                                         }
@@ -1240,6 +1237,39 @@ export default function CameraFeed({
         return () => cancelAnimationFrame(animationId);
     }, [enrolledPlates, enrolledTargets, isScanning, lastMatch]);
 
+    // Compute continuous active HUD detection status based on lastMatch OR active presence map / detections
+    const now = Date.now();
+    let activeSubjectLabel = lastMatch;
+
+    if (!activeSubjectLabel && activePresenceMapRef.current) {
+        for (const [key, presence] of activePresenceMapRef.current.entries()) {
+            if (presence && (now - presence.lastSeen) < 2500) {
+                if (key.startsWith('INTRUDER_') || presence.subjectName === 'UNAUTHORIZED PERSON') {
+                    activeSubjectLabel = 'INTRUDER DETECTED';
+                    break;
+                } else if (key.startsWith('FACE_')) {
+                    activeSubjectLabel = `TARGET: ${presence.subjectName}`;
+                    break;
+                } else if (key.startsWith('PLATE_')) {
+                    activeSubjectLabel = `PLATE: ${presence.subjectName}`;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!activeSubjectLabel && activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
+        const freshDets = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 2500);
+        if (freshDets.length > 0) {
+            const topDet = freshDets[0];
+            if (topDet.label?.includes('UNAUTHORIZED')) {
+                activeSubjectLabel = 'INTRUDER DETECTED';
+            } else if (topDet.label) {
+                activeSubjectLabel = topDet.label.replace('FACE: ', 'TARGET: ');
+            }
+        }
+    }
+
     return (
         <div className="relative w-full aspect-video max-h-[70vh] rounded-2xl bg-black border border-slate-800 shadow-2xl flex items-center justify-center overflow-hidden select-none">
             <button
@@ -1261,26 +1291,26 @@ export default function CameraFeed({
 
             {/* Top Right HUD Scanner Status Box */}
             <div className={`absolute top-3 right-3 z-20 px-3.5 py-2 rounded-xl border font-mono text-[11px] flex items-center gap-2.5 shadow-xl backdrop-blur-md transition-all ${
-                lastMatch
-                    ? (lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED')
+                activeSubjectLabel
+                    ? (activeSubjectLabel.includes('INTRUDER') || activeSubjectLabel.includes('UNAUTHORIZED')
                         ? 'bg-rose-950/90 border-rose-600/80 text-rose-200 shadow-rose-950/50 animate-pulse'
-                        : (lastMatch.includes('TARGET')
+                        : (activeSubjectLabel.includes('TARGET')
                             ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 shadow-emerald-950/50'
                             : 'bg-amber-950/90 border-amber-500/80 text-amber-200 shadow-amber-950/50'))
                     : 'bg-slate-900/90 border-slate-700/80 text-slate-300 shadow-black/50'
             }`}>
                 <span className={`w-2.5 h-2.5 rounded-full ${
-                    lastMatch
-                        ? (lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED') ? 'bg-rose-500 animate-ping' : 'bg-emerald-400 animate-pulse')
+                    activeSubjectLabel
+                        ? (activeSubjectLabel.includes('INTRUDER') || activeSubjectLabel.includes('UNAUTHORIZED') ? 'bg-rose-500 animate-ping' : 'bg-emerald-400 animate-pulse')
                         : 'bg-cyan-400 animate-pulse'
                 }`} />
                 <span className="font-bold tracking-wide uppercase">
-                    {lastMatch ? (
-                        lastMatch.includes('INTRUDER') || lastMatch.includes('UNAUTHORIZED')
+                    {activeSubjectLabel ? (
+                        activeSubjectLabel.includes('INTRUDER') || activeSubjectLabel.includes('UNAUTHORIZED')
                             ? '⚠️ ALERT: UNAUTHORIZED PERSON DETECTED'
-                            : (lastMatch.includes('TARGET')
-                                ? `MATCH DETECTED // ${lastMatch}`
-                                : `DETECTION // ${lastMatch}`)
+                            : (activeSubjectLabel.includes('TARGET')
+                                ? `MATCH DETECTED // ${activeSubjectLabel}`
+                                : `DETECTION // ${activeSubjectLabel}`)
                     ) : (
                         'AI SCANNER ACTIVE // NO SUBJECT IN FRAME'
                     )}
