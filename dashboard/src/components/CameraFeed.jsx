@@ -4,15 +4,30 @@ import { CURRENT_NODE_LOCATION } from '../config/location';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 
-let cocoModelPromise = null;
-function getCocoModel() {
-    if (!cocoModelPromise) {
-        cocoModelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' }).catch(err => {
-            console.warn("COCO-SSD load failed, falling back to heuristic detector:", err);
-            return null;
+let cocoModelGlobal = null;
+let isPreloadingCocoModel = false;
+
+function initCocoModelInBackground() {
+    if (cocoModelGlobal || isPreloadingCocoModel) return;
+    isPreloadingCocoModel = true;
+    try {
+        tf.ready().then(() => {
+            return cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        }).then(model => {
+            cocoModelGlobal = model;
+            console.info("COCO-SSD Browser AI Model initialized successfully.");
+        }).catch(err => {
+            console.warn("COCO-SSD model load error:", err);
+        }).finally(() => {
+            isPreloadingCocoModel = false;
         });
+    } catch (e) {
+        isPreloadingCocoModel = false;
     }
-    return cocoModelPromise;
+}
+
+if (typeof window !== 'undefined') {
+    setTimeout(initCocoModelInBackground, 300);
 }
 
 const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
@@ -921,11 +936,10 @@ export default function CameraFeed({
 
                                 // 1. Try TensorFlow.js COCO-SSD Person Detector for high-precision browser AI detection
                                 try {
-                                    const cocoModel = await getCocoModel();
-                                    if (cocoModel) {
-                                        const predictions = await cocoModel.detect(mediaSource);
+                                    if (cocoModelGlobal) {
+                                        const predictions = await cocoModelGlobal.detect(mediaSource);
                                         if (predictions && predictions.length > 0) {
-                                            const personPreds = predictions.filter(p => p.class === 'person' && p.score >= 0.35);
+                                            const personPreds = predictions.filter(p => p.class === 'person' && p.score >= 0.30);
                                             if (personPreds.length > 0) {
                                                 fromCocoSsd = true;
                                                 personPreds.forEach(p => {
@@ -982,11 +996,6 @@ export default function CameraFeed({
                                 const cropEvaluations = [];
 
                                 for (const crop of candidateCrops) {
-                                    if (!fromNativeDetector && !fromCocoSsd) {
-                                        const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                        if (skinRatio < 0.005 && !hasFaceStructure(mediaSource, crop)) continue;
-                                    }
-
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
                                     let bestMatch = null;
                                     let maxScore = -1.0;
