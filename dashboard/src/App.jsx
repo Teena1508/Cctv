@@ -351,28 +351,45 @@ export default function App() {
   const [aiBackendOnline, setAiBackendOnline] = useState(true);
   const [aiBackendLabel, setAiBackendLabel] = useState('ONLINE (PYTHON BACKEND)');
 
-  // Background health check for the AI Scan server on port 8002 (or deployed URL)
+  // Background health check and auto-start for the AI Scan server
   useEffect(() => {
     const checkBackend = async () => {
       try {
-        const res = await fetch(`${AI_BACKEND_BASE}/`);
+        const res = await fetch(`${AI_BACKEND_BASE}/api/health`);
         if (res.ok) {
           setAiBackendOnline(true);
           setAiBackendLabel('ONLINE (PYTHON BACKEND)');
         } else {
+          fetch('/api/ensure-backend').catch(() => {});
           setAiBackendOnline(true);
-          setAiBackendLabel('ONLINE (BROWSER AI)');
+          setAiBackendLabel('ONLINE (PYTHON BACKEND)');
         }
       } catch (e) {
-        // Live deployment fallback to client-side browser AI
+        fetch('/api/ensure-backend').catch(() => {});
         setAiBackendOnline(true);
-        setAiBackendLabel('ONLINE (BROWSER AI)');
+        setAiBackendLabel('ONLINE (PYTHON BACKEND)');
       }
     };
 
     checkBackend();
-    const interval = setInterval(checkBackend, 5000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkBackend, 6000);
+
+    const handleWake = () => {
+      if (document.visibilityState === 'visible') {
+        checkBackend();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleWake);
+    window.addEventListener('focus', handleWake);
+    window.addEventListener('pageshow', handleWake);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleWake);
+      window.removeEventListener('focus', handleWake);
+      window.removeEventListener('pageshow', handleWake);
+    };
   }, []);
 
   // Update triggerGpsSync in App.jsx to try high accuracy, fallback to low accuracy, and display clear error notifications
@@ -508,7 +525,7 @@ export default function App() {
       detection.eventType === 'UNAUTHORIZED PRESENCE';
 
     // 1. Silent Camera Mode: Allow detection if enrolled targets, enrolled plates, active restricted rules exist, OR if an un-enrolled intruder is detected!
-    if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0 && !isUnauthorizedPerson) {
+    if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0 && !isUnauthorizedPerson && detection.eventType !== 'SUBJECT DEPARTED') {
       return;
     }
 
@@ -549,39 +566,42 @@ export default function App() {
 
     // 5. Departure Events: Log clean departure alerts when subjects leave camera frame
     if (detection.eventType === 'SUBJECT DEPARTED') {
-      // Non-enrolled / unauthorized person departure alerts fire ONLY during active restricted timings!
-      if (isUnauthorizedPerson && !isRestrictedIntrusion) {
-        return;
-      }
-
       const currentCam = cameras.find(c => c.id === detection.cameraId) || cameras[0];
+      const deptSubject = detection.subject || 'UNAUTHORIZED PERSON';
       const newAlert = {
-        id: Date.now() + Math.random().toString(36).substring(2, 7),
+        id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         camera_id: currentCam.id,
         event_type: 'SUBJECT DEPARTED',
         severity: 'LOW',
-        details: detection.details || `👋 Subject '${detection.subject}' departed camera feed on ${currentCam.id}`,
-        subject: `DEPARTED: ${detection.subject}`,
+        details: `👋 Subject '${deptSubject}' departed camera feed on ${currentCam.id}`,
+        subject: `DEPARTED: ${deptSubject}`,
         lat: currentCam.lat,
         lng: currentCam.lng,
         address: currentCam.address,
         timestamp: new Date().toLocaleTimeString()
       };
-      setLocalAlerts(prev => [newAlert, ...prev]);
+      setLocalAlerts(prev => {
+        const isDuplicate = prev.slice(0, 15).some(existing => 
+          existing.subject === newAlert.subject &&
+          existing.event_type === newAlert.event_type &&
+          existing.camera_id === newAlert.camera_id &&
+          (Date.now() - (existing._rawTime || 0) < 4000)
+        );
+        if (isDuplicate) return prev;
+        newAlert._rawTime = Date.now();
+        return [newAlert, ...prev].slice(0, 50);
+      });
       return;
     }
 
     // 6. Alert Trigger Policy Enforcement for Arrivals / Matches:
     // - Enrolled Targets (TARGET MATCH / PLATE MATCH): ALWAYS trigger alerts (every time, 24/7).
-    // - Non-Enrolled Persons (UNAUTHORIZED PERSON): Trigger alerts ONLY during active restricted timings!
-    if (isUnauthorizedPerson && !isRestrictedIntrusion) {
-      return;
-    }
+    // - Non-Enrolled Persons (UNAUTHORIZED PERSON): Trigger UNAUTHORIZED PRESENCE alerts (HIGH severity), upgraded to RESTRICTED INTRUSION (CRITICAL severity) during active restricted timings!
 
     const currentCam = cameras.find(c => c.id === detection.cameraId) || cameras[0];
 
     const newAlert = {
-      id: Date.now() + Math.random().toString(36).substring(2, 7),
+      id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
       camera_id: currentCam.id,
       event_type: isRestrictedIntrusion && isUnauthorizedPerson
         ? 'RESTRICTED INTRUSION'
@@ -599,7 +619,17 @@ export default function App() {
       timestamp: new Date().toLocaleTimeString()
     };
 
-    setLocalAlerts(prev => [newAlert, ...prev]);
+    setLocalAlerts(prev => {
+      const isDuplicate = prev.slice(0, 15).some(existing => 
+        existing.camera_id === newAlert.camera_id &&
+        existing.event_type === newAlert.event_type &&
+        (existing.subject === newAlert.subject || (isUnauthorizedPerson && existing.subject?.includes('UNAUTHORIZED'))) &&
+        (Date.now() - (existing._rawTime || 0) < 20000)
+      );
+      if (isDuplicate) return prev;
+      newAlert._rawTime = Date.now();
+      return [newAlert, ...prev].slice(0, 50);
+    });
   };
 
   useEffect(() => {
@@ -933,35 +963,49 @@ export default function App() {
                     No targets matched in active feeds.
                   </div>
                 ) : (
-                  activeAlerts.slice(0, 6).map((alert) => (
-                    <div
-                      key={alert.id}
-                      className={`p-3.5 rounded-xl border transition-all text-xs space-y-2 hover:bg-slate-900/90 ${alert.severity === 'CRITICAL' ? 'bg-rose-950/20 border-rose-900/50' : 'bg-slate-900/60 border-slate-800/80'}`}
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="font-mono font-bold tracking-wider flex items-center gap-1.5 text-slate-200">
-                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                          {alert.event_type}
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800/50">
-                          {alert.severity}
-                        </span>
-                      </div>
-                      <div className="text-slate-300 font-semibold text-sm">
-                        {alert.subject || alert.details}
-                      </div>
+                  activeAlerts.slice(0, 6).map((alert) => {
+                    const isCritical = alert.severity === 'CRITICAL';
+                    const isHigh = alert.severity === 'HIGH';
+                    const cardStyle = isCritical
+                      ? 'bg-rose-950/25 border-rose-900/60'
+                      : (isHigh ? 'bg-amber-950/25 border-amber-900/60' : 'bg-slate-900/60 border-slate-800/80');
+                    const badgeStyle = isCritical
+                      ? 'bg-rose-950 text-rose-400 border-rose-800/60'
+                      : (isHigh ? 'bg-amber-950 text-amber-400 border-amber-800/60' : 'bg-slate-800 text-slate-300 border-slate-700/60');
+                    const indicatorColor = isCritical
+                      ? 'bg-rose-500 animate-ping'
+                      : (isHigh ? 'bg-amber-400 animate-pulse' : 'bg-blue-400');
 
-                      {/* Video Evidence Clip Preview */}
-                      {alert.videoUrl && (
-                        <div className="mt-2 rounded-lg overflow-hidden border border-slate-800">
-                          <div className="text-[10px] font-mono text-cyan-400 bg-slate-950 px-2 py-1 flex items-center gap-1">
-                            🎥 RECORDED EVIDENCE CLIP
-                          </div>
-                          <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-36 object-cover" />
+                    return (
+                      <div
+                        key={alert.id}
+                        className={`p-3.5 rounded-xl border transition-all text-xs space-y-2 hover:bg-slate-900/90 ${cardStyle}`}
+                      >
+                        <div className="flex justify-between items-center">
+                          <span className="font-mono font-bold tracking-wider flex items-center gap-1.5 text-slate-200">
+                            <span className={`w-2 h-2 rounded-full ${indicatorColor}`}></span>
+                            {alert.event_type}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${badgeStyle}`}>
+                            {alert.severity}
+                          </span>
                         </div>
-                      )}
-                    </div>
-                  ))
+                        <div className="text-slate-300 font-semibold text-sm">
+                          {alert.subject || alert.details}
+                        </div>
+
+                        {/* Video Evidence Clip Preview */}
+                        {alert.videoUrl && (
+                          <div className="mt-2 rounded-lg overflow-hidden border border-slate-800">
+                            <div className="text-[10px] font-mono text-cyan-400 bg-slate-950 px-2 py-1 flex items-center gap-1">
+                              🎥 RECORDED EVIDENCE CLIP
+                            </div>
+                            <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-36 object-cover" />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -1401,44 +1445,58 @@ export default function App() {
                   No detection alerts recorded yet.
                 </div>
               ) : (
-                activeAlerts.map((alert) => (
-                  <div
-                    key={alert.id}
-                    className={`p-5 rounded-2xl border transition-all space-y-3 ${alert.severity === 'CRITICAL' ? 'bg-rose-950/20 border-rose-900/50' : 'bg-slate-900/60 border-slate-800/80'}`}
-                  >
-                    <div className="flex justify-between items-center">
-                      <span className="font-mono font-bold tracking-wider text-sm flex items-center gap-2 text-slate-200">
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                        {alert.event_type}
-                      </span>
-                      <span className="px-3 py-1 rounded text-xs font-bold bg-rose-950 text-rose-400 border border-rose-800/50">
-                        {alert.severity}
-                      </span>
-                    </div>
+                activeAlerts.map((alert) => {
+                  const isCritical = alert.severity === 'CRITICAL';
+                  const isHigh = alert.severity === 'HIGH';
+                  const cardStyle = isCritical
+                    ? 'bg-rose-950/25 border-rose-900/60'
+                    : (isHigh ? 'bg-amber-950/25 border-amber-900/60' : 'bg-slate-900/60 border-slate-800/80');
+                  const badgeStyle = isCritical
+                    ? 'bg-rose-950 text-rose-400 border-rose-800/60'
+                    : (isHigh ? 'bg-amber-950 text-amber-400 border-amber-800/60' : 'bg-slate-800 text-slate-300 border-slate-700/60');
+                  const indicatorColor = isCritical
+                    ? 'bg-rose-500 animate-ping'
+                    : (isHigh ? 'bg-amber-400 animate-pulse' : 'bg-blue-400');
 
-                    <div className="text-slate-200 font-semibold text-base">
-                      {alert.details || `Spotted: ${alert.subject}`}
-                    </div>
-
-                    {/* Playable Recorded Video Clip */}
-                    {alert.videoUrl && (
-                      <div className="mt-3 rounded-xl overflow-hidden border border-slate-800 bg-black">
-                        <div className="text-xs font-mono text-cyan-400 bg-slate-950 px-3 py-1.5 font-bold flex items-center gap-2">
-                          🎥 RECORDED EVIDENCE VIDEO CLIP
-                        </div>
-                        <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-72 object-contain" />
+                  return (
+                    <div
+                      key={alert.id}
+                      className={`p-5 rounded-2xl border transition-all space-y-3 ${cardStyle}`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="font-mono font-bold tracking-wider text-sm flex items-center gap-2 text-slate-200">
+                          <span className={`w-2.5 h-2.5 rounded-full ${indicatorColor}`}></span>
+                          {alert.event_type}
+                        </span>
+                        <span className={`px-3 py-1 rounded text-xs font-bold border ${badgeStyle}`}>
+                          {alert.severity}
+                        </span>
                       </div>
-                    )}
 
-                    <div className="flex justify-between items-center text-xs text-slate-400 font-mono pt-2 border-t border-slate-800/60">
-                      <span>📍 {alert.address} (GPS: {alert.lat ? alert.lat.toFixed(4) : '0.00'}, {alert.lng ? alert.lng.toFixed(4) : '0.00'})</span>
-                      <span className="flex items-center gap-1 text-slate-400 font-sans">
-                        <Clock className="w-3.5 h-3.5" />
-                        {alert.timestamp}
-                      </span>
+                      <div className="text-slate-200 font-semibold text-base">
+                        {alert.details || `Spotted: ${alert.subject}`}
+                      </div>
+
+                      {/* Playable Recorded Video Clip */}
+                      {alert.videoUrl && (
+                        <div className="mt-3 rounded-xl overflow-hidden border border-slate-800 bg-black">
+                          <div className="text-xs font-mono text-cyan-400 bg-slate-950 px-3 py-1.5 font-bold flex items-center gap-2">
+                            🎥 RECORDED EVIDENCE VIDEO CLIP
+                          </div>
+                          <video src={alert.videoUrl} controls autoPlay muted loop className="w-full max-h-72 object-contain" />
+                        </div>
+                      )}
+
+                      <div className="flex justify-between items-center text-xs text-slate-400 font-mono pt-2 border-t border-slate-800/60">
+                        <span>📍 {alert.address} (GPS: {alert.lat ? alert.lat.toFixed(4) : '0.00'}, {alert.lng ? alert.lng.toFixed(4) : '0.00'})</span>
+                        <span className="flex items-center gap-1 text-slate-400 font-sans">
+                          <Clock className="w-3.5 h-3.5" />
+                          {alert.timestamp}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

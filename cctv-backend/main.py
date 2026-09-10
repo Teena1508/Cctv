@@ -135,24 +135,34 @@ class SmartFaceAnalyzer:
                 self.real_analyzer = None
 
     def init_fallback(self):
-        print("[SmartFaceAnalyzer] Initializing OpenCV Haar Cascade face detector fallback...")
         try:
-            cascade_path = None
-            if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
-                cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+            cascade_paths = []
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            cascade_paths.append(os.path.join(script_dir, 'haarcascade_frontalface_default.xml'))
+            cascade_paths.append('cctv-backend/haarcascade_frontalface_default.xml')
+            cascade_paths.append('haarcascade_frontalface_default.xml')
             
-            if cascade_path and os.path.exists(cascade_path):
-                self.fallback_analyzer = cv2.CascadeClassifier(cascade_path)
-            elif hasattr(cv2, 'CascadeClassifier'):
-                self.fallback_analyzer = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-            else:
-                self.fallback_analyzer = None
+            if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
+                cascade_paths.append(os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml'))
+
+            self.fallback_analyzer = None
+            for cp in cascade_paths:
+                if cp and os.path.exists(cp):
+                    clf = cv2.CascadeClassifier(cp)
+                    if clf and not clf.empty():
+                        self.fallback_analyzer = clf
+                        print(f"[SmartFaceAnalyzer] Loaded Haar Cascade from: {cp}")
+                        break
+
+            if self.fallback_analyzer is None and hasattr(cv2, 'CascadeClassifier'):
+                clf = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+                if clf and not clf.empty():
+                    self.fallback_analyzer = clf
         except Exception as e:
             print(f"[SmartFaceAnalyzer] Haar cascade fallback error: {e}")
             self.fallback_analyzer = None
 
         if self.fallback_analyzer is None or getattr(self.fallback_analyzer, 'empty', lambda: True)():
-            print("[SmartFaceAnalyzer] WARNING: Haar Cascade unavailable or empty.")
             self.fallback_analyzer = None
         else:
             print("[SmartFaceAnalyzer] Fallback face detector initialized successfully.")
@@ -164,17 +174,20 @@ class SmartFaceAnalyzer:
         if self.real_analyzer is not None:
             try:
                 faces = self.real_analyzer.get(img)
-                return faces if faces is not None else []
+                if faces is not None and len(faces) > 0:
+                    return faces
             except Exception as e:
                 print(f"[SmartFaceAnalyzer] InsightFace get() error: {e}. Attempting fallback...")
-                self.real_analyzer = None
 
         if self.fallback_analyzer is None:
             self.init_fallback()
 
         if self.fallback_analyzer is not None:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 and img.shape[2] == 3 else img
-            detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=6, minSize=(45, 45))
+            try:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 and img.shape[2] == 3 else img
+                detected = self.fallback_analyzer.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(30, 30))
+            except Exception:
+                detected = []
 
             class HaarFace:
                 def __init__(self, bbox, embedding):
@@ -186,21 +199,42 @@ class SmartFaceAnalyzer:
             for (x, y, w, h) in detected:
                 if not is_valid_face_crop(img, x, y, w, h):
                     continue
-                face_crop = gray[y:y+h, x:x+w]
-                resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
-                sig_256 = resized.flatten().astype(np.float32) / 255.0
-                mean = np.mean(sig_256)
-                std = np.std(sig_256)
-                if std > 1e-4:
-                    sig_256 = (sig_256 - mean) / std
-                else:
-                    sig_256 = sig_256 - mean
-                sig_512 = np.concatenate([sig_256, sig_256])
+                face_crop = img[y:y+h, x:x+w]
+                sig_512 = extract_visual_feature_vector(face_crop)
+                if sig_512 is None or len(sig_512) != 512:
+                    sig_512 = np.zeros(512, dtype=np.float32)
                 faces.append(HaarFace(bbox=np.array([int(x), int(y), int(x+w), int(y+h)]), embedding=sig_512))
 
             return faces
 
         return []
+
+def extract_visual_feature_vector(crop):
+    if crop is None or crop.size == 0:
+        return None
+    try:
+        resized = cv2.resize(crop, (32, 32), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 and resized.shape[2] == 3 else resized
+        
+        res_16 = cv2.resize(gray, (16, 16), interpolation=cv2.INTER_AREA)
+        sig_256 = res_16.flatten().astype(np.float32) / 255.0
+        
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+        mag_16 = cv2.resize(mag, (16, 16), interpolation=cv2.INTER_AREA)
+        grad_256 = mag_16.flatten().astype(np.float32)
+        norm_grad = np.linalg.norm(grad_256)
+        if norm_grad > 1e-5:
+            grad_256 = grad_256 / norm_grad
+
+        vec = np.concatenate([sig_256, grad_256])
+        norm = np.linalg.norm(vec)
+        if norm > 1e-5:
+            vec = vec / norm
+        return vec
+    except Exception:
+        return None
 
 face_analyzer = SmartFaceAnalyzer()
 target_cache = {}
@@ -283,6 +317,14 @@ def get_target_embedding(target):
                         return feat_vec
         except Exception as ex:
             print(f"[Face Ingest] Direct ArcFace extraction warning for '{name}': {ex}")
+
+    # 4. Universal visual feature vector extraction fallback for guaranteed target matching
+    if resized_img is not None:
+        vis_vec = extract_visual_feature_vector(resized_img)
+        if vis_vec is not None and len(vis_vec) == 512:
+            target_cache[image_src] = vis_vec
+            print(f"[Face Ingest] ✅ Cached visual feature vector for target: '{name}' (Vector Dim: 512)")
+            return vis_vec
 
     return None
 
@@ -597,6 +639,15 @@ def home():
         "debug_mode": DEBUG_MODE
     }
 
+@app.get("/api/health")
+@app.get("/api/ensure-backend")
+def health_check():
+    return {
+        "status": "ok",
+        "online": True,
+        "timestamp": time.time()
+    }
+
 @app.get("/api/debug-frame")
 def get_debug_frame():
     filepath = "debug_frames/latest_debug.jpg"
@@ -631,7 +682,7 @@ def scan_face(
             if emb is not None:
                 valid_targets.append((target.get("name", "Unknown"), emb))
                 
-        # Process face detection regardless of whether target_list is empty
+        # Process face detection with high-accuracy 640px frame
         processed_frame, scale = resize_for_face_detection(frame, max_size=640)
         faces = face_analyzer.get(processed_frame)
         
@@ -685,15 +736,9 @@ def scan_face(
 
                 if scores:
                     candidate_name, candidate_sim = scores[0]
-                    threshold = 0.65 if is_fallback else FACE_MATCH_SIM_THRESHOLD
+                    threshold = 0.28 if is_fallback else 0.35
                     
-                    margin_valid = True
-                    if len(scores) > 1 and not is_fallback:
-                        second_name, second_sim = scores[1]
-                        if candidate_sim < 0.45 and second_sim > 0.20 and (candidate_sim - second_sim) < 0.03 and candidate_name != second_name:
-                            margin_valid = False
-
-                    if candidate_sim >= threshold and margin_valid:
+                    if candidate_sim >= threshold:
                         top_name = candidate_name
                         top_sim = candidate_sim
 

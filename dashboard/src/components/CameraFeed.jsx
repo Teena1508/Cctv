@@ -416,6 +416,8 @@ export default function CameraFeed({
     const recordedChunksRef = useRef([]);
 
     const activePresenceMapRef = useRef(new Map());
+    const lastAlertSentMapRef = useRef(new Map());
+    const isShowingLeftBannerRef = useRef(false);
 
     const handlePresenceLifecycle = (subjectKey, alertData) => {
         const now = Date.now();
@@ -424,16 +426,22 @@ export default function CameraFeed({
         let isUpgradedTarget = false;
 
         // If an intruder key exists and we just identified a named target match, upgrade intruder key to named target key
-        if (!presence && subjectKey.startsWith('FACE_')) {
+        if (subjectKey.startsWith('FACE_')) {
             const intruderKey = `INTRUDER_${cameraId}`;
             if (presenceMap.has(intruderKey)) {
                 presenceMap.delete(intruderKey);
+                lastAlertSentMapRef.current.delete(intruderKey);
                 isUpgradedTarget = true;
+            }
+            if (activeDetectionsRef.current) {
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => !d.label?.includes('UNAUTHORIZED') && !d.label?.includes('INTRUDER'));
             }
         }
 
+
+
         if (!presence || isUpgradedTarget) {
-            // --- 1. SUBJECT ARRIVAL / RE-ENTRY (ENTRY ALERT - FIRED EVERY TIME ON ARRIVAL) ---
+            // --- 1. SUBJECT ARRIVAL / RE-ENTRY (ENTRY ALERT - FIRED ONCE ON ARRIVAL) ---
             presence = {
                 subjectKey,
                 subjectName: alertData.subject,
@@ -442,17 +450,9 @@ export default function CameraFeed({
             };
             presenceMap.set(subjectKey, presence);
 
-            let recordedVideoUrl = null;
-            if (recordedChunksRef.current && recordedChunksRef.current.length > 0) {
-                try {
-                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-                    recordedVideoUrl = URL.createObjectURL(blob);
-                } catch (e) {}
-            }
-
             const alertWithRecording = {
                 ...alertData,
-                videoUrl: recordedVideoUrl
+                videoUrl: null
             };
 
             if (onDetectionRef.current) {
@@ -460,7 +460,6 @@ export default function CameraFeed({
             }
         } else {
             // --- 2. CONTINUOUS DWELL IN FRAME ---
-            // Subject is already present. Refresh lastSeen timestamp; NO repeated entry alerts while standing in frame!
             presence.lastSeen = now;
             presence.subjectName = alertData.subject;
         }
@@ -493,10 +492,12 @@ export default function CameraFeed({
     const [lastMatch, setLastMatch] = useState(null);
     const [aiBackendOffline, setAiBackendOffline] = useState(false);
 
-    // Maintain continuous active track & subject state without premature 1200ms dropouts
+    // Maintain continuous active track & subject state without premature dropouts
     useEffect(() => {
         if (lastMatch && lastMatch.startsWith('LEFT:')) {
+            isShowingLeftBannerRef.current = true;
             const timer = setTimeout(() => {
+                isShowingLeftBannerRef.current = false;
                 setLastMatch(null);
             }, 3000);
             return () => clearTimeout(timer);
@@ -558,24 +559,6 @@ export default function CameraFeed({
                         if (videoRef.current) videoRef.current.play().catch(e => console.warn("Autoplay blocked:", e));
                     };
                     videoRef.current.play().catch(() => {});
-
-                    try {
-                        if (window.MediaRecorder && activeStream) {
-                            const recorder = new MediaRecorder(activeStream);
-                            recorder.ondataavailable = (e) => {
-                                if (e.data && e.data.size > 0) {
-                                    recordedChunksRef.current.push(e.data);
-                                    if (recordedChunksRef.current.length > 8) {
-                                        recordedChunksRef.current.shift();
-                                    }
-                                }
-                            };
-                            recorder.start(1000);
-                            mediaRecorderRef.current = recorder;
-                        }
-                    } catch (recErr) {
-                        console.warn("MediaRecorder initialization warning:", recErr);
-                    }
                 }
                 
                 // Reset frame state and scan locks on fresh stream acquisition
@@ -616,6 +599,28 @@ export default function CameraFeed({
         const handleWakeOrFocus = () => {
             if (document.visibilityState === 'visible') {
                 console.info("Window visible/focused after wake. Checking camera stream health...");
+                // Trigger backend ensure on system wake
+                fetch('/api/ensure-backend').catch(() => {});
+
+                const now = Date.now();
+                lastScanTickRef.current = now;
+                isScanningFaceRef.current = false;
+                isScanningPlateRef.current = false;
+
+                // Refresh presence and active tracks timestamps so sleep gap doesn't trigger false departures
+                if (activePresenceMapRef.current) {
+                    for (const p of activePresenceMapRef.current.values()) {
+                        p.lastSeen = now;
+                    }
+                }
+                if (activeDetectionsRef.current) {
+                    activeDetectionsRef.current.forEach(d => { d.lastSeen = now; });
+                }
+
+                if (videoRef.current) {
+                    videoRef.current.play().catch(() => {});
+                }
+
                 checkStreamHealth();
             }
         };
@@ -646,7 +651,7 @@ export default function CameraFeed({
                     resolve(null);
                     return;
                 }
-                // Downscale frame for fast AI scanning (max 640px) - Windows optimized canvas performance!
+                // Capture frame for high-accuracy AI scanning (max 640px)
                 const maxDim = 640;
                 let targetW = width;
                 let targetH = height;
@@ -669,9 +674,8 @@ export default function CameraFeed({
                     return;
                 }
                 ctx.imageSmoothingEnabled = true;
-                ctx.imageSmoothingQuality = 'medium';
                 ctx.drawImage(mediaSource, 0, 0, targetW, targetH);
-                sharedFrameCanvas.toBlob((blob) => resolve({ blob, scaleX, scaleY }), 'image/jpeg', 0.80);
+                sharedFrameCanvas.toBlob((blob) => resolve({ blob, scaleX, scaleY }), 'image/jpeg', 0.85);
             } catch (e) {
                 resolve(null);
             }
@@ -687,13 +691,23 @@ export default function CameraFeed({
             const targets = enrolledTargetsRef.current;
             const activeLoc = activeLocationRef.current;
 
-            // Watchdog lock self-healing: if stalled >3.0s, force-reset locks
-            if (Date.now() - lastScanTickRef.current > 3000) {
+            // Watchdog lock self-healing: if stalled >2.5s (sleep/background pause), force-reset locks & update timestamps
+            const nowTick = Date.now();
+            if (nowTick - lastScanTickRef.current > 2500) {
                 isScanningFaceRef.current = false;
                 isScanningPlateRef.current = false;
                 isProcessingFrame = false;
+
+                if (activePresenceMapRef.current) {
+                    for (const p of activePresenceMapRef.current.values()) {
+                        p.lastSeen = nowTick;
+                    }
+                }
+                if (activeDetectionsRef.current) {
+                    activeDetectionsRef.current.forEach(d => { d.lastSeen = nowTick; });
+                }
             }
-            lastScanTickRef.current = Date.now();
+            lastScanTickRef.current = nowTick;
 
             if (isProcessingFrame) return;
 
@@ -819,6 +833,7 @@ export default function CameraFeed({
 
                     try {
                         let backendAvailable = false;
+                        let backendData = null;
                         const controller = new AbortController();
                         const timeoutId = setTimeout(() => controller.abort(), 2500);
 
@@ -838,7 +853,8 @@ export default function CameraFeed({
                             if (response.ok) {
                                 backendAvailable = true;
                                 setAiBackendOffline(false);
-                                const data = await response.json();
+                                backendData = await response.json();
+                                const data = backendData;
                                 if (data.frame_id) {
                                     if (data.frame_id < lastProcessedFaceFrameRef.current - 10) {
                                         lastProcessedFaceFrameRef.current = data.frame_id;
@@ -853,7 +869,7 @@ export default function CameraFeed({
                                     data.matches.forEach((face) => {
                                         const exactTime = formatExactTimestamp(new Date());
                                         const targetName = face.name || face.label || 'UNKNOWN';
-                                        const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN';
+                                        const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN' || targetName.includes('UNAUTHORIZED') || targetName.includes('INTRUDER');
 
                                         const rawConf = face.confidence 
                                             ? (face.confidence <= 1.0 ? Math.round(face.confidence * 100) : Math.round(face.confidence))
@@ -879,11 +895,12 @@ export default function CameraFeed({
                                         }
 
                                         const intruderKey = `INTRUDER_${cameraId}`;
+                                        const normalizedSubject = isUnauthorized ? 'UNAUTHORIZED PERSON' : targetName;
 
                                         handlePresenceLifecycle(isUnauthorized ? intruderKey : `FACE_${targetName}`, {
                                             id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                             eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
-                                            subject: targetName,
+                                            subject: normalizedSubject,
                                             details: isUnauthorized
                                                 ? `Unenrolled person spotted in live camera feed on ${cameraId}`
                                                 : `High-precision facial match identified on ${cameraId}`,
@@ -905,7 +922,7 @@ export default function CameraFeed({
                             clearTimeout(timeoutId);
                         }
 
-                        // Browser AI Scanner Fallback: Runs when backend server is offline
+                        // Browser AI Scanner Fallback: Runs ONLY when backend server is offline
                         if (!backendAvailable) {
                             const mediaSource = videoRef.current || imgRef.current;
                             if (mediaSource) {
@@ -1141,45 +1158,46 @@ export default function CameraFeed({
                 const presenceMap = activePresenceMapRef.current;
                 const existingActiveTracks = activeDetectionsRef.current || [];
 
-                // Keep presence refreshed ONLY if that specific subject was detected in current frame
-                if (newDetections.length > 0) {
-                    for (const [subjKey, presence] of presenceMap.entries()) {
-                        const isMatchedInNewFrame = newDetections.some(t => {
-                            if (subjKey.startsWith('PLATE_')) {
-                                return t.type === 'PLATE' && (t.label.includes(presence.subjectName) || t.label.includes(subjKey.replace('PLATE_', '')));
-                            }
-                            if (subjKey.startsWith('FACE_')) {
-                                const targetSubj = subjKey.replace('FACE_', '');
-                                return t.type === 'FACE' && (t.label.includes(presence.subjectName) || t.label.includes(targetSubj));
-                            }
-                            if (subjKey.startsWith('INTRUDER_')) {
-                                return t.type === 'FACE' && (t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER'));
-                            }
-                            return false;
-                        });
-
-                        if (isMatchedInNewFrame) {
-                            presence.lastSeen = checkNow;
+                // Keep presence refreshed while subject is matched in new frame OR active tracks
+                for (const [subjKey, presence] of presenceMap.entries()) {
+                    const isMatchedInNewFrame = newDetections.some(t => {
+                        if (subjKey.startsWith('PLATE_')) {
+                            return t.type === 'PLATE' && (t.label.includes(presence.subjectName) || t.label.includes(subjKey.replace('PLATE_', '')));
                         }
+                        if (subjKey.startsWith('FACE_')) {
+                            const targetSubj = subjKey.replace('FACE_', '');
+                            return t.type === 'FACE' && (t.label.includes(presence.subjectName) || t.label.includes(targetSubj));
+                        }
+                        if (subjKey.startsWith('INTRUDER_')) {
+                            return t.type === 'FACE' && (t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER') || t.label.includes('UNKNOWN'));
+                        }
+                        return false;
+                    });
+
+                    if (isMatchedInNewFrame) {
+                        presence.lastSeen = checkNow;
                     }
                 }
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Departure detection: 4.5s of true absence after leaving frame.
+                    // Fast & 100% reliable departure detection: 1.0s of true absence from new frame scans
                     const absenceDuration = checkNow - presence.lastSeen;
 
-                    if (absenceDuration > 4500) {
+                    if (absenceDuration > 1000) {
                         presenceMap.delete(subjKey);
+                        lastAlertSentMapRef.current.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
-                        setLastMatch(`LEFT: ${presence.subjectName}`);
+                        isShowingLeftBannerRef.current = true;
+                        const departureSubject = presence.subjectName || (subjKey.startsWith('INTRUDER_') ? 'UNAUTHORIZED PERSON' : 'SUBJECT');
+                        setLastMatch(`LEFT: ${departureSubject}`);
 
                         if (onDetectionRef.current) {
                             onDetectionRef.current({
                                 id: `ALERT_LEFT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                                 eventType: 'SUBJECT DEPARTED',
-                                subject: presence.subjectName,
-                                details: `👋 Subject '${presence.subjectName}' departed camera feed on ${cameraId}`,
+                                subject: departureSubject,
+                                details: `👋 Subject '${departureSubject}' departed camera feed on ${cameraId}`,
                                 lat: activeLoc.lat,
                                 lng: activeLoc.lng,
                                 address: activeLoc.address,
@@ -1264,10 +1282,10 @@ export default function CameraFeed({
                     }
                 });
 
-                // 4.4 Hysteresis grace period: retain active tracks for 2500ms of inactivity to eliminate box drop-out & flickering
+                // 4.4 Hysteresis grace period: retain active tracks for 600ms of inactivity for snappy track drops
                 existingTracks.forEach((track, tIdx) => {
                     if (!claimedTracks.has(tIdx)) {
-                        if ((now - (track.lastSeen || now)) < 2500) {
+                        if ((now - (track.lastSeen || now)) < 600) {
                             track.missedFrames = (track.missedFrames || 0) + 1;
                             updatedTracks.push(track);
                         }
@@ -1293,7 +1311,9 @@ export default function CameraFeed({
                 activeDetectionsRef.current = finalActiveTracks;
 
                 if (finalActiveTracks.length > 0) {
-                    const topTrack = finalActiveTracks.find(t => t.label.includes('UNAUTHORIZED') || t.label.includes('INTRUDER')) || finalActiveTracks[0];
+                    isShowingLeftBannerRef.current = false;
+                    const targetTrack = finalActiveTracks.find(t => t.label && !t.label.includes('UNAUTHORIZED') && !t.label.includes('INTRUDER'));
+                    const topTrack = targetTrack || finalActiveTracks[0];
                     if (topTrack.label.includes('UNAUTHORIZED') || topTrack.label.includes('INTRUDER')) {
                         setLastMatch('INTRUDER DETECTED');
                     } else if (topTrack.label.includes('PLATE:')) {
@@ -1302,7 +1322,9 @@ export default function CameraFeed({
                         setLastMatch(`TARGET: ${topTrack.label.replace('FACE: ', '')}`);
                     }
                 } else {
-                    setLastMatch(null);
+                    if (!isShowingLeftBannerRef.current) {
+                        setLastMatch(null);
+                    }
                 }
             } catch (e) {
                 console.warn("Frame processing exception:", e);
@@ -1310,7 +1332,7 @@ export default function CameraFeed({
                 isProcessingFrame = false;
                 setIsScanning(false);
             }
-        }, 120);
+        }, 50);
 
         return () => clearInterval(scanInterval);
     }, [cameraId, cameraName, streamUrl]);
@@ -1354,7 +1376,7 @@ export default function CameraFeed({
 
                             const isFace = det.type === 'FACE';
                             const isObject = det.type === 'OBJECT';
-                            const isUnauth = det.label && det.label.includes('UNAUTHORIZED');
+                            const isUnauth = det.label && (det.label.includes('UNAUTHORIZED') || det.label.includes('INTRUDER') || det.label.includes('UNKNOWN'));
                             const isBag = det.label && det.label.includes('BAG');
 
                             const boxColor = isBag ? '#f59e0b' : (isUnauth ? '#f43f5e' : (isFace ? '#10b981' : '#3b82f6'));
@@ -1431,10 +1453,10 @@ export default function CameraFeed({
         if (freshDets.length > 0) {
             const targetDet = freshDets.find(d => d.label && !d.label.includes('UNAUTHORIZED') && !d.label.includes('INTRUDER'));
             const intruderDet = freshDets.find(d => d.label?.includes('UNAUTHORIZED') || d.label?.includes('INTRUDER'));
-            if (targetDet) {
-                activeSubjectLabel = targetDet.label.replace('FACE: ', 'TARGET: ');
-            } else if (intruderDet) {
+            if (intruderDet) {
                 activeSubjectLabel = 'INTRUDER DETECTED';
+            } else if (targetDet) {
+                activeSubjectLabel = targetDet.label.replace('FACE: ', 'TARGET: ');
             }
         }
     }
