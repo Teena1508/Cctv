@@ -7,7 +7,7 @@ A real-time, edge-assisted AI surveillance dashboard and analytics engine for au
 ## 1. Project Information
 
 - **Project Title:** AI-Video-Surveillance
-- **PS ID:** SIH2026-DEMO-001
+- **PS ID:** 26187
 - **PS Title:** AI-Based Intelligent Video Analytics Platform for Border Surveillance using existing CCTV Infrastructure.
 - **Category:** Software
 - **Theme:** Blockchain & Cybersecurity
