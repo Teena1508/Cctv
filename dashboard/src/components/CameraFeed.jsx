@@ -599,8 +599,8 @@ export default function CameraFeed({
         const handleWakeOrFocus = () => {
             if (document.visibilityState === 'visible') {
                 console.info("Window visible/focused after wake. Checking camera stream health...");
-                // Trigger backend ensure on system wake
-                fetch('/api/ensure-backend').catch(() => {});
+                // Trigger backend ensure on system wake (only in local dev mode)
+                if (import.meta.env.DEV) fetch('/api/ensure-backend').catch(() => {});
 
                 const now = Date.now();
                 lastScanTickRef.current = now;
@@ -741,9 +741,13 @@ export default function CameraFeed({
                 const currentTimestamp = Date.now() / 1000.0;
                 let newDetections = [];
 
+                const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+                const isLocalBackend = AI_BACKEND_BASE.includes('localhost') || AI_BACKEND_BASE.includes('127.0.0.1');
+                const canQueryBackend = !(isHttpsPage && isLocalBackend);
+
                 // Define parallel scanner tasks with AbortController & safe finally locks
                 const scanPlateTask = async () => {
-                    if (isScanningPlateRef.current) return;
+                    if (isScanningPlateRef.current || !canQueryBackend) return;
                     isScanningPlateRef.current = true;
                     
                     const controller = new AbortController();
@@ -834,21 +838,23 @@ export default function CameraFeed({
                     try {
                         let backendAvailable = false;
                         let backendData = null;
-                        const controller = new AbortController();
-                        const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-                        try {
-                            const faceFormData = new FormData();
-                            faceFormData.append('file', blob, 'frame.jpg');
-                            faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets || []));
-                            faceFormData.append('frame_id', currentFrameId.toString());
-                            faceFormData.append('timestamp', currentTimestamp.toString());
+                        if (canQueryBackend) {
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-                            const response = await fetch(`${AI_BACKEND_BASE}/api/scan-face`, {
-                                method: 'POST',
-                                body: faceFormData,
-                                signal: controller.signal
-                            });
+                            try {
+                                const faceFormData = new FormData();
+                                faceFormData.append('file', blob, 'frame.jpg');
+                                faceFormData.append('targets', typeof targets === 'string' ? targets : JSON.stringify(targets || []));
+                                faceFormData.append('frame_id', currentFrameId.toString());
+                                faceFormData.append('timestamp', currentTimestamp.toString());
+
+                                const response = await fetch(`${AI_BACKEND_BASE}/api/scan-face`, {
+                                    method: 'POST',
+                                    body: faceFormData,
+                                    signal: controller.signal
+                                });
 
                             if (response.ok) {
                                 backendAvailable = true;
@@ -919,8 +925,9 @@ export default function CameraFeed({
                         } catch (backendErr) {
                             backendAvailable = false;
                         } finally {
-                            clearTimeout(timeoutId);
+                            if (typeof timeoutId !== 'undefined') clearTimeout(timeoutId);
                         }
+                    }
 
                         // Browser AI Scanner Fallback: Runs ONLY when backend server is offline
                         if (!backendAvailable) {

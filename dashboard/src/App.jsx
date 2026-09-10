@@ -354,25 +354,35 @@ export default function App() {
   // Background health check and auto-start for the AI Scan server
   useEffect(() => {
     const checkBackend = async () => {
+      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+      const isLocalhostBackend = AI_BACKEND_BASE.includes('localhost') || AI_BACKEND_BASE.includes('127.0.0.1');
+
+      if (isHttps && isLocalhostBackend) {
+        // Mixed content protection on Vercel/HTTPS: localhost HTTP backend cannot be fetched from HTTPS site
+        setAiBackendOnline(false);
+        setAiBackendLabel('STANDALONE ENGINE (BROWSER AI)');
+        return;
+      }
+
       try {
-        const res = await fetch(`${AI_BACKEND_BASE}/api/health`);
+        const res = await fetch(`${AI_BACKEND_BASE}/api/health`, { signal: AbortSignal.timeout(3000) });
         if (res.ok) {
           setAiBackendOnline(true);
           setAiBackendLabel('ONLINE (PYTHON BACKEND)');
         } else {
-          fetch('/api/ensure-backend').catch(() => {});
-          setAiBackendOnline(true);
-          setAiBackendLabel('ONLINE (PYTHON BACKEND)');
+          if (import.meta.env.DEV) fetch('/api/ensure-backend').catch(() => {});
+          setAiBackendOnline(false);
+          setAiBackendLabel('STANDALONE ENGINE (BROWSER AI)');
         }
       } catch (e) {
-        fetch('/api/ensure-backend').catch(() => {});
-        setAiBackendOnline(true);
-        setAiBackendLabel('ONLINE (PYTHON BACKEND)');
+        if (import.meta.env.DEV) fetch('/api/ensure-backend').catch(() => {});
+        setAiBackendOnline(false);
+        setAiBackendLabel('STANDALONE ENGINE (BROWSER AI)');
       }
     };
 
     checkBackend();
-    const interval = setInterval(checkBackend, 6000);
+    const interval = setInterval(checkBackend, 8000);
 
     const handleWake = () => {
       if (document.visibilityState === 'visible') {
@@ -427,11 +437,16 @@ export default function App() {
       }
       setGpsError(errorMsg);
 
-      fetch('http://ip-api.com/json/')
-        .then(res => res.json())
+      fetch('https://ipapi.co/json/')
+        .then(res => {
+          if (!res.ok) throw new Error("ipapi failed");
+          return res.json();
+        })
         .then(data => {
-          if (data.lat && data.lon) {
-            const userCoords = [data.lat, data.lon];
+          const lat = data.latitude || data.lat;
+          const lon = data.longitude || data.lon;
+          if (lat && lon) {
+            const userCoords = [parseFloat(lat), parseFloat(lon)];
             setLaptopLocation(userCoords);
             setMapCenter(userCoords);
             setLocationSource('IP GEOLOCATION');
@@ -439,11 +454,25 @@ export default function App() {
             throw new Error("Invalid IP geo data");
           }
         })
-        .catch(ipErr => {
-          console.warn("IP Geolocation failed too, falling back to static config:", ipErr);
-          setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-          setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
-          setLocationSource('STATIC NODE');
+        .catch(() => {
+          fetch('https://ip-api.com/json/')
+            .then(res => res.json())
+            .then(data => {
+              if (data.lat && data.lon) {
+                const userCoords = [data.lat, data.lon];
+                setLaptopLocation(userCoords);
+                setMapCenter(userCoords);
+                setLocationSource('IP GEOLOCATION');
+              } else {
+                throw new Error("Invalid secondary IP geo");
+              }
+            })
+            .catch(ipErr => {
+              console.warn("IP Geolocation fallback used static config:", ipErr);
+              setLaptopLocation([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+              setMapCenter([CURRENT_NODE_LOCATION.lat, CURRENT_NODE_LOCATION.lng]);
+              setLocationSource('STATIC NODE');
+            });
         });
     };
 
