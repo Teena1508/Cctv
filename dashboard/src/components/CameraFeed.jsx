@@ -992,13 +992,12 @@ export default function CameraFeed({
                                     candidateCrops = findDynamicFaceCrops(mediaSource);
                                 }
 
-                                let matchedTargetInFrame = false;
-                                const cropEvaluations = [];
+                                let bestTargetMatch = null;
+                                let bestTargetScore = -1.0;
+                                let bestMatchCrop = null;
 
                                 for (const crop of candidateCrops) {
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
-                                    let bestMatch = null;
-                                    let maxScore = -1.0;
 
                                     if (frameSig && targetList && targetList.length > 0) {
                                         for (const target of targetList) {
@@ -1009,38 +1008,30 @@ export default function CameraFeed({
                                                     for (let i = 0; i < frameSig.length; i++) {
                                                         dot += frameSig[i] * targetSig[i];
                                                     }
-                                                    if (dot > maxScore) {
-                                                        maxScore = dot;
-                                                        bestMatch = { target, score: dot };
+                                                    if (dot > bestTargetScore) {
+                                                        bestTargetScore = dot;
+                                                        bestTargetMatch = target;
+                                                        bestMatchCrop = crop;
                                                     }
                                                 }
                                             }
                                         }
                                     }
-
-                                    if (bestMatch && maxScore >= 0.68) {
-                                        matchedTargetInFrame = true;
-                                    }
-
-                                    cropEvaluations.push({
-                                        crop,
-                                        bestMatch,
-                                        maxScore
-                                    });
                                 }
 
-                                for (const evalItem of cropEvaluations) {
-                                    const { crop, bestMatch, maxScore } = evalItem;
-                                    const bx1 = srcWidth * crop.x;
-                                    const by1 = srcHeight * crop.y;
-                                    const bx2 = srcWidth * (crop.x + crop.w);
-                                    const by2 = srcHeight * (crop.y + crop.h);
+                                const primaryCrop = bestMatchCrop || candidateCrops[0];
+
+                                if (primaryCrop) {
+                                    const bx1 = srcWidth * primaryCrop.x;
+                                    const by1 = srcHeight * primaryCrop.y;
+                                    const bx2 = srcWidth * (primaryCrop.x + primaryCrop.w);
+                                    const by2 = srcHeight * (primaryCrop.y + primaryCrop.h);
                                     const exactTime = formatExactTimestamp(new Date());
 
-                                    if (bestMatch && maxScore >= 0.68) {
-                                        const targetName = bestMatch.target.name || 'WATCHLIST TARGET';
+                                    if (bestTargetMatch && bestTargetScore >= 0.72) {
+                                        const targetName = bestTargetMatch.name || 'WATCHLIST TARGET';
                                         setLastMatch(`TARGET: ${targetName}`);
-                                        const matchConfidence = Math.min(99, Math.max(88, Math.round((maxScore) * 100)));
+                                        const matchConfidence = Math.min(99, Math.max(88, Math.round(bestTargetScore * 100)));
 
                                         newDetections.push({
                                             type: 'FACE',
