@@ -1208,11 +1208,13 @@ export default function CameraFeed({
                     }
                 }
 
+                const departureThreshold = canQueryBackend ? 2500 : 4500;
+
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Fast & 100% reliable departure detection: 1.0s of true absence from new frame scans
+                    // Departure detection: threshold adjusted based on engine scan latency
                     const absenceDuration = checkNow - presence.lastSeen;
 
-                    if (absenceDuration > 1000) {
+                    if (absenceDuration > departureThreshold) {
                         presenceMap.delete(subjKey);
                         lastAlertSentMapRef.current.delete(subjKey);
 
