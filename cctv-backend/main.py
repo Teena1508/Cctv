@@ -358,6 +358,10 @@ class TemporalTracker:
         with self.lock:
             confirmed_matches = []
 
+            if frame_id < getattr(self, 'last_frame_id', 0) - 10:
+                self.tracks.clear()
+            self.last_frame_id = frame_id
+
             # 1. Build spatial overlap & distance matching candidates between existing tracks and new detections
             candidates = []
             for det_idx, det in enumerate(detected_matches):

@@ -272,15 +272,16 @@ function findDynamicFaceCrops(imgSource) {
             }
         }
 
-        // If no segment candidate passed, but skin count is valid, fallback to center/wide crops
-        if (candidateCrops.length === 0 && totalSkinCount > 50) {
-            candidateCrops.push({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
-            candidateCrops.push({ x: 0.2, y: 0.15, w: 0.6, h: 0.7 });
+        // Always ensure at least default multi-scale center/upper crops if no specific segment was isolated
+        if (candidateCrops.length === 0) {
+            candidateCrops.push({ x: 0.15, y: 0.10, w: 0.70, h: 0.80 });
+            candidateCrops.push({ x: 0.25, y: 0.15, w: 0.50, h: 0.60 });
+            candidateCrops.push({ x: 0.05, y: 0.05, w: 0.90, h: 0.90 });
         }
 
         return candidateCrops;
     } catch (e) {
-        return [];
+        return [{ x: 0.15, y: 0.10, w: 0.70, h: 0.80 }];
     }
 }
 
@@ -512,13 +513,19 @@ export default function CameraFeed({
         return () => clearInterval(cleanupInterval);
     }, []);
 
-    // 1. Live Webcam Stream Setup with Auto-Recovery on Reload
+    // 1. Live Webcam Stream Setup with Auto-Recovery on Reload & Laptop Wake/Resume
     useEffect(() => {
         let activeStream = null;
+        let isReconnecting = false;
 
         async function initCamera() {
-            if (streamUrl) return;
+            if (streamUrl || isReconnecting) return;
+            isReconnecting = true;
             try {
+                if (activeStream) {
+                    activeStream.getTracks().forEach((track) => track.stop());
+                }
+
                 activeStream = await navigator.mediaDevices.getUserMedia({
                     video: {
                         width: { ideal: 1280 },
@@ -527,6 +534,22 @@ export default function CameraFeed({
                     },
                     audio: false,
                 });
+
+                if (activeStream) {
+                    activeStream.getVideoTracks().forEach((track) => {
+                        track.onended = () => {
+                            console.warn("Webcam track ended (laptop slept or camera disconnected). Triggering auto-recovery...");
+                            initCamera();
+                        };
+                        track.onmute = () => {
+                            console.warn("Webcam track muted.");
+                        };
+                        track.onunmute = () => {
+                            console.info("Webcam track unmuted.");
+                            if (videoRef.current) videoRef.current.play().catch(() => {});
+                        };
+                    });
+                }
 
                 if (videoRef.current) {
                     videoRef.current.srcObject = activeStream;
@@ -553,22 +576,62 @@ export default function CameraFeed({
                         console.warn("MediaRecorder initialization warning:", recErr);
                     }
                 }
+                
+                // Reset frame state and scan locks on fresh stream acquisition
+                isScanningFaceRef.current = false;
+                isScanningPlateRef.current = false;
+                lastProcessedFaceFrameRef.current = 0;
+                lastProcessedPlateFrameRef.current = 0;
+                frameCounterRef.current = 0;
+                setError(null);
             } catch (err) {
                 console.error("Camera Access Error:", err);
-                setError("Camera access required. Ensure URL is localhost or HTTPS.");
+                setError("Camera access required. Click overlay to retry.");
+            } finally {
+                isReconnecting = false;
             }
         }
 
         initCamera();
 
-        const playRecoveryTimer = setInterval(() => {
-            if (videoRef.current && (videoRef.current.paused || videoRef.current.ended) && !streamUrl) {
-                videoRef.current.play().catch(() => {});
+        // 2. Recovery Watchdog & Laptop Wake / Screen Unlock Event Listeners
+        const checkStreamHealth = () => {
+            if (streamUrl) return;
+
+            const isDeadTrack = activeStream && activeStream.getVideoTracks().some(t => t.readyState === 'ended' || t.muted);
+            const isVideoStuck = videoRef.current && (!videoRef.current.srcObject || videoRef.current.paused || videoRef.current.ended || videoRef.current.videoWidth === 0);
+
+            if (isDeadTrack || isVideoStuck) {
+                if (videoRef.current && (videoRef.current.paused || videoRef.current.ended) && !isDeadTrack) {
+                    videoRef.current.play().catch(() => {
+                        initCamera();
+                    });
+                } else {
+                    initCamera();
+                }
             }
-        }, 1500);
+        };
+
+        const handleWakeOrFocus = () => {
+            if (document.visibilityState === 'visible') {
+                console.info("Window visible/focused after wake. Checking camera stream health...");
+                checkStreamHealth();
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleWakeOrFocus);
+        window.addEventListener('focus', handleWakeOrFocus);
+        window.addEventListener('pageshow', handleWakeOrFocus);
+        window.addEventListener('online', handleWakeOrFocus);
+
+        const playRecoveryTimer = setInterval(checkStreamHealth, 1500);
 
         return () => {
             clearInterval(playRecoveryTimer);
+            document.removeEventListener('visibilitychange', handleWakeOrFocus);
+            window.removeEventListener('focus', handleWakeOrFocus);
+            window.removeEventListener('pageshow', handleWakeOrFocus);
+            window.removeEventListener('online', handleWakeOrFocus);
             if (activeStream) {
                 activeStream.getTracks().forEach((track) => track.stop());
             }
@@ -686,10 +749,15 @@ export default function CameraFeed({
                         if (response.ok) {
                             setAiBackendOffline(false);
                             const data = await response.json();
-                            if (data.frame_id && data.frame_id < lastProcessedPlateFrameRef.current) {
-                                return;
+                            if (data.frame_id) {
+                                if (data.frame_id < lastProcessedPlateFrameRef.current - 10) {
+                                    lastProcessedPlateFrameRef.current = data.frame_id;
+                                } else if (data.frame_id < lastProcessedPlateFrameRef.current) {
+                                    return;
+                                } else {
+                                    lastProcessedPlateFrameRef.current = data.frame_id;
+                                }
                             }
-                            if (data.frame_id) lastProcessedPlateFrameRef.current = data.frame_id;
 
                             if (data.results && data.results.length > 0) {
                                 data.results.forEach((item) => {
@@ -770,10 +838,15 @@ export default function CameraFeed({
                                 backendAvailable = true;
                                 setAiBackendOffline(false);
                                 const data = await response.json();
-                                if (data.frame_id && data.frame_id < lastProcessedFaceFrameRef.current) {
-                                    return;
+                                if (data.frame_id) {
+                                    if (data.frame_id < lastProcessedFaceFrameRef.current - 10) {
+                                        lastProcessedFaceFrameRef.current = data.frame_id;
+                                    } else if (data.frame_id < lastProcessedFaceFrameRef.current) {
+                                        return;
+                                    } else {
+                                        lastProcessedFaceFrameRef.current = data.frame_id;
+                                    }
                                 }
-                                if (data.frame_id) lastProcessedFaceFrameRef.current = data.frame_id;
 
                                 if (data.matches && data.matches.length > 0) {
                                     data.matches.forEach((face) => {
