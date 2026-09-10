@@ -1,6 +1,19 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Camera, RefreshCw, AlertCircle, Eye, AlertTriangle, ShieldCheck, MapPin } from 'lucide-react';
 import { CURRENT_NODE_LOCATION } from '../config/location';
+import * as tf from '@tensorflow/tfjs';
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
+
+let cocoModelPromise = null;
+function getCocoModel() {
+    if (!cocoModelPromise) {
+        cocoModelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' }).catch(err => {
+            console.warn("COCO-SSD load failed, falling back to heuristic detector:", err);
+            return null;
+        });
+    }
+    return cocoModelPromise;
+}
 
 const AI_BACKEND_BASE = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:8002';
 const HAS_AI_BACKEND = Boolean(AI_BACKEND_BASE);
@@ -160,7 +173,7 @@ function hasFaceStructure(imgSource, cropBox) {
 
 function findDynamicFaceCrops(imgSource) {
     try {
-        if (!sharedStructureCanvas) return [];
+        if (!sharedStructureCanvas) return [{ x: 0.15, y: 0.10, w: 0.70, h: 0.80 }];
         const sampleW = 120;
         const sampleH = 90;
         if (sharedStructureCanvas.width !== sampleW || sharedStructureCanvas.height !== sampleH) {
@@ -168,7 +181,7 @@ function findDynamicFaceCrops(imgSource) {
             sharedStructureCanvas.height = sampleH;
         }
         const ctx = sharedStructureCanvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return [];
+        if (!ctx) return [{ x: 0.15, y: 0.10, w: 0.70, h: 0.80 }];
 
         ctx.drawImage(imgSource, 0, 0, sampleW, sampleH);
         const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
@@ -185,13 +198,10 @@ function findDynamicFaceCrops(imgSource) {
                 const g = imgData[idx + 1];
                 const b = imgData[idx + 2];
 
-                const isSkin = (r > 50 && g > 30 && b > 15 &&
-                    (Math.max(r, g, b) - Math.min(r, g, b) > 10) &&
-                    r > g && r > b) ||
-                    ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 65) &&
-                     (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 140) &&
-                     (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 110) &&
-                     (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 185));
+                const isSkin = (r > 35 && g > 20 && b > 10 && (r > b)) ||
+                    (r > 40 && g > 30 && (Math.abs(r - g) > 8)) ||
+                    ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 60) &&
+                     (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 105));
 
                 if (isSkin) {
                     skinMask[y * sampleW + x] = 1;
@@ -201,16 +211,11 @@ function findDynamicFaceCrops(imgSource) {
             }
         }
 
-        if (totalSkinCount < (totalPixels * 0.015) || totalSkinCount > (totalPixels * 0.85)) {
-            return [];
-        }
-
-        // Group active X columns into distinct segments (clusters per person)
         const segments = [];
         let currentSeg = null;
 
         for (let x = 0; x < sampleW; x++) {
-            if (colSkinCounts[x] >= 2) {
+            if (colSkinCounts[x] >= 1) {
                 if (!currentSeg) {
                     currentSeg = { startX: x, endX: x };
                 } else {
@@ -219,60 +224,52 @@ function findDynamicFaceCrops(imgSource) {
             } else {
                 if (currentSeg) {
                     if (x - currentSeg.endX > 4) {
-                        segments.push(currentSeg);
+                        if (currentSeg.endX - currentSeg.startX + 1 >= 3) {
+                            segments.push(currentSeg);
+                        }
                         currentSeg = null;
                     }
                 }
             }
         }
-        if (currentSeg) segments.push(currentSeg);
+        if (currentSeg && (currentSeg.endX - currentSeg.startX + 1 >= 3)) segments.push(currentSeg);
 
         const candidateCrops = [];
 
         for (const seg of segments) {
             const segWidth = seg.endX - seg.startX + 1;
-            if (segWidth < 4) continue;
-
             let minY = sampleH, maxY = 0;
-            let segSkinCount = 0;
 
             for (let y = 0; y < sampleH; y++) {
                 for (let x = seg.startX; x <= seg.endX; x++) {
                     if (skinMask[y * sampleW + x]) {
-                        segSkinCount++;
                         if (y < minY) minY = y;
                         if (y > maxY) maxY = y;
                     }
                 }
             }
 
-            const segHeight = maxY - minY + 1;
-            if (segHeight < 4) continue;
+            const segHeight = Math.max(4, maxY - minY + 1);
 
-            // Full segment bounding box
-            const cropFull = {
+            candidateCrops.push({
                 x: Math.max(0, (seg.startX - 1) / sampleW),
                 y: Math.max(0, (minY - 1) / sampleH),
                 w: Math.min(1.0, (segWidth + 2) / sampleW),
                 h: Math.min(1.0, (segHeight + 2) / sampleH)
-            };
+            });
 
-            candidateCrops.push(cropFull);
-
-            // Upper face/head portion if segment includes upper body
-            if (segHeight > segWidth * 1.2) {
+            if (segHeight > segWidth * 1.1) {
                 const headH = Math.min(segHeight, Math.round(segWidth * 1.3));
-                const cropHead = {
+                candidateCrops.push({
                     x: Math.max(0, (seg.startX - 1) / sampleW),
                     y: Math.max(0, (minY - 1) / sampleH),
                     w: Math.min(1.0, (segWidth + 2) / sampleW),
                     h: Math.min(1.0, (headH + 2) / sampleH)
-                };
-                candidateCrops.push(cropHead);
+                });
             }
         }
 
-        // Always ensure at least default multi-scale center/upper crops if no specific segment was isolated
+        // Always ensure default multi-scale center/upper crops if no specific segment was isolated
         if (candidateCrops.length === 0) {
             candidateCrops.push({ x: 0.15, y: 0.10, w: 0.70, h: 0.80 });
             candidateCrops.push({ x: 0.25, y: 0.15, w: 0.50, h: 0.60 });
@@ -920,8 +917,45 @@ export default function CameraFeed({
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
                                 let candidateCrops = [];
                                 let fromNativeDetector = false;
+                                let fromCocoSsd = false;
 
-                                if ('FaceDetector' in window) {
+                                // 1. Try TensorFlow.js COCO-SSD Person Detector for high-precision browser AI detection
+                                try {
+                                    const cocoModel = await getCocoModel();
+                                    if (cocoModel) {
+                                        const predictions = await cocoModel.detect(mediaSource);
+                                        if (predictions && predictions.length > 0) {
+                                            const personPreds = predictions.filter(p => p.class === 'person' && p.score >= 0.35);
+                                            if (personPreds.length > 0) {
+                                                fromCocoSsd = true;
+                                                personPreds.forEach(p => {
+                                                    const [px, py, pw, ph] = p.bbox;
+                                                    candidateCrops.push({
+                                                        x: Math.max(0, px / srcWidth),
+                                                        y: Math.max(0, py / srcHeight),
+                                                        w: Math.min(1.0, pw / srcWidth),
+                                                        h: Math.min(1.0, ph / srcHeight),
+                                                        score: p.score
+                                                    });
+                                                    if (ph > 30) {
+                                                        candidateCrops.push({
+                                                            x: Math.max(0, px / srcWidth),
+                                                            y: Math.max(0, py / srcHeight),
+                                                            w: Math.min(1.0, pw / srcWidth),
+                                                            h: Math.min(1.0, (ph * 0.45) / srcHeight),
+                                                            score: p.score
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                } catch (cocoErr) {
+                                    console.warn("COCO-SSD detection error:", cocoErr);
+                                }
+
+                                // 2. Native Chrome FaceDetector API
+                                if (candidateCrops.length === 0 && 'FaceDetector' in window) {
                                     try {
                                         const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 10 });
                                         const results = await detector.detect(mediaSource);
@@ -939,6 +973,7 @@ export default function CameraFeed({
                                     }
                                 }
 
+                                // 3. Fallback Heuristic Face/Head/Body Segment Detector
                                 if (candidateCrops.length === 0) {
                                     candidateCrops = findDynamicFaceCrops(mediaSource);
                                 }
@@ -947,11 +982,10 @@ export default function CameraFeed({
                                 const cropEvaluations = [];
 
                                 for (const crop of candidateCrops) {
-                                    if (!fromNativeDetector) {
+                                    if (!fromNativeDetector && !fromCocoSsd) {
                                         const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                        if (skinRatio < 0.01) continue;
+                                        if (skinRatio < 0.005 && !hasFaceStructure(mediaSource, crop)) continue;
                                     }
-                                    if (!hasFaceStructure(mediaSource, crop)) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
                                     let bestMatch = null;
