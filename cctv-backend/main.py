@@ -235,7 +235,7 @@ def get_target_embedding(target):
     if not image_src:
         return None
     
-    if image_src in target_cache:
+    if image_src in target_cache and target_cache[image_src] is not None and len(target_cache[image_src]) == 512:
         return target_cache[image_src]
     
     img = decode_base64_image(image_src)
@@ -252,7 +252,28 @@ def get_target_embedding(target):
         padded = cv2.copyMakeBorder(resized_img, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REFLECT)
         faces = face_analyzer.get(padded)
 
-    # 2. Contrast enhancement fallback (CLAHE)
+    # 2. Direct ArcFace recognition feature extraction for tight face crops
+    if not faces and resized_img is not None and face_analyzer.real_analyzer is not None:
+        try:
+            if hasattr(face_analyzer.real_analyzer, 'models') and 'recognition' in face_analyzer.real_analyzer.models:
+                rec_model = face_analyzer.real_analyzer.models['recognition']
+                if hasattr(rec_model, 'get_feat'):
+                    face_img_112 = cv2.resize(resized_img, (112, 112))
+                    feat = rec_model.get_feat(face_img_112)
+                    if feat is not None:
+                        feat_vec = feat.flatten().astype(np.float32)
+                        norm = np.linalg.norm(feat_vec)
+                        if norm > 0:
+                            feat_vec = feat_vec / norm
+                        class DirectArcFaceTarget:
+                            def __init__(self, emb):
+                                self.bbox = np.array([0, 0, resized_img.shape[1], resized_img.shape[0]])
+                                self.embedding = emb
+                        faces = [DirectArcFaceTarget(feat_vec)]
+        except Exception as ex:
+            print(f"[Face Ingest] Direct ArcFace extraction warning for '{name}': {ex}")
+
+    # 3. Contrast enhancement fallback (CLAHE)
     if not faces and resized_img is not None and len(resized_img.shape) == 3:
         lab = cv2.cvtColor(resized_img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
