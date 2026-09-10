@@ -152,7 +152,7 @@ function hasFaceStructure(imgSource, cropBox) {
         }
         const stdDev = Math.sqrt(variance / lums.length);
 
-        return stdDev >= 0.018;
+        return stdDev >= 0.003;
     } catch (e) {
         return false;
     }
@@ -173,9 +173,10 @@ function findDynamicFaceCrops(imgSource) {
         ctx.drawImage(imgSource, 0, 0, sampleW, sampleH);
         const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
 
-        let minX = sampleW, maxX = 0, minY = sampleH, maxY = 0;
-        let skinCount = 0;
         const totalPixels = sampleW * sampleH;
+        const colSkinCounts = new Int16Array(sampleW);
+        const skinMask = new Uint8Array(totalPixels);
+        let totalSkinCount = 0;
 
         for (let y = 0; y < sampleH; y++) {
             for (let x = 0; x < sampleW; x++) {
@@ -184,43 +185,100 @@ function findDynamicFaceCrops(imgSource) {
                 const g = imgData[idx + 1];
                 const b = imgData[idx + 2];
 
-                const isSkin = (r > 60 && g > 40 && b > 20 &&
-                    (Math.max(r, g, b) - Math.min(r, g, b) > 12) &&
+                const isSkin = (r > 50 && g > 30 && b > 15 &&
+                    (Math.max(r, g, b) - Math.min(r, g, b) > 10) &&
                     r > g && r > b) ||
-                    ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 70) &&
-                     (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 135) &&
-                     (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 115) &&
-                     (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 180));
+                    ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 65) &&
+                     (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 140) &&
+                     (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 110) &&
+                     (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 185));
 
                 if (isSkin) {
-                    skinCount++;
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
+                    skinMask[y * sampleW + x] = 1;
+                    colSkinCounts[x]++;
+                    totalSkinCount++;
                 }
             }
         }
 
-        // If skin coverage is too low (<3%) or too high (>75%, e.g. palm over lens), return no face
-        if (skinCount < (totalPixels * 0.03) || skinCount > (totalPixels * 0.75)) return [];
-
-        const bw = maxX - minX;
-        const bh = maxY - minY;
-
-        if (bw < sampleW * 0.08 || bh < sampleH * 0.08) return [];
-
-        const cropBox = {
-            x: Math.max(0, (minX - 1) / sampleW),
-            y: Math.max(0, (minY - 1) / sampleH),
-            w: Math.min(1.0, (bw + 2) / sampleW),
-            h: Math.min(1.0, (bh + 2) / sampleH)
-        };
-
-        if (hasFaceStructure(imgSource, cropBox)) {
-            return [cropBox];
+        if (totalSkinCount < (totalPixels * 0.015) || totalSkinCount > (totalPixels * 0.85)) {
+            return [];
         }
-        return [];
+
+        // Group active X columns into distinct segments (clusters per person)
+        const segments = [];
+        let currentSeg = null;
+
+        for (let x = 0; x < sampleW; x++) {
+            if (colSkinCounts[x] >= 2) {
+                if (!currentSeg) {
+                    currentSeg = { startX: x, endX: x };
+                } else {
+                    currentSeg.endX = x;
+                }
+            } else {
+                if (currentSeg) {
+                    if (x - currentSeg.endX > 4) {
+                        segments.push(currentSeg);
+                        currentSeg = null;
+                    }
+                }
+            }
+        }
+        if (currentSeg) segments.push(currentSeg);
+
+        const candidateCrops = [];
+
+        for (const seg of segments) {
+            const segWidth = seg.endX - seg.startX + 1;
+            if (segWidth < 4) continue;
+
+            let minY = sampleH, maxY = 0;
+            let segSkinCount = 0;
+
+            for (let y = 0; y < sampleH; y++) {
+                for (let x = seg.startX; x <= seg.endX; x++) {
+                    if (skinMask[y * sampleW + x]) {
+                        segSkinCount++;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+
+            const segHeight = maxY - minY + 1;
+            if (segHeight < 4) continue;
+
+            // Full segment bounding box
+            const cropFull = {
+                x: Math.max(0, (seg.startX - 1) / sampleW),
+                y: Math.max(0, (minY - 1) / sampleH),
+                w: Math.min(1.0, (segWidth + 2) / sampleW),
+                h: Math.min(1.0, (segHeight + 2) / sampleH)
+            };
+
+            candidateCrops.push(cropFull);
+
+            // Upper face/head portion if segment includes upper body
+            if (segHeight > segWidth * 1.2) {
+                const headH = Math.min(segHeight, Math.round(segWidth * 1.3));
+                const cropHead = {
+                    x: Math.max(0, (seg.startX - 1) / sampleW),
+                    y: Math.max(0, (minY - 1) / sampleH),
+                    w: Math.min(1.0, (segWidth + 2) / sampleW),
+                    h: Math.min(1.0, (headH + 2) / sampleH)
+                };
+                candidateCrops.push(cropHead);
+            }
+        }
+
+        // If no segment candidate passed, but skin count is valid, fallback to center/wide crops
+        if (candidateCrops.length === 0 && totalSkinCount > 50) {
+            candidateCrops.push({ x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
+            candidateCrops.push({ x: 0.2, y: 0.15, w: 0.6, h: 0.7 });
+        }
+
+        return candidateCrops;
     } catch (e) {
         return [];
     }
@@ -443,12 +501,12 @@ export default function CameraFeed({
         }
     }, [lastMatch]);
 
-    // Clear stale bounding box overlays after 2.5 seconds of no update (using lastSeen timestamp)
+    // Clear stale bounding box overlays after 4.5 seconds of no update (using lastSeen timestamp)
     useEffect(() => {
         const cleanupInterval = setInterval(() => {
             if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
                 const now = Date.now();
-                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 2500);
+                activeDetectionsRef.current = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 4500);
             }
         }, 500);
         return () => clearInterval(cleanupInterval);
@@ -806,7 +864,7 @@ export default function CameraFeed({
 
                                 for (const crop of candidateCrops) {
                                     const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.05) continue;
+                                    if (skinRatio < 0.03) continue;
                                     if (!hasFaceStructure(mediaSource, crop)) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
@@ -879,10 +937,6 @@ export default function CameraFeed({
                                             severity: 'CRITICAL',
                                         });
                                     } else {
-                                        if (maxScore >= 0.25) {
-                                            continue;
-                                        }
-
                                         const intruderLabel = 'UNAUTHORIZED PERSON';
                                         setLastMatch(`INTRUDER DETECTED`);
 
@@ -1034,10 +1088,10 @@ export default function CameraFeed({
                 }
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Departure detection: 600ms of true absence after leaving frame.
+                    // Departure detection: 4.5s of true absence after leaving frame.
                     const absenceDuration = checkNow - presence.lastSeen;
 
-                    if (absenceDuration > 600) {
+                    if (absenceDuration > 4500) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
@@ -1135,10 +1189,10 @@ export default function CameraFeed({
                     }
                 });
 
-                // 4.4 Hysteresis grace period: retain active tracks for 300ms of inactivity to eliminate box drop-out & flickering
+                // 4.4 Hysteresis grace period: retain active tracks for 2500ms of inactivity to eliminate box drop-out & flickering
                 existingTracks.forEach((track, tIdx) => {
                     if (!claimedTracks.has(tIdx)) {
-                        if ((now - (track.lastSeen || now)) < 300) {
+                        if ((now - (track.lastSeen || now)) < 2500) {
                             track.missedFrames = (track.missedFrames || 0) + 1;
                             updatedTracks.push(track);
                         }
@@ -1296,9 +1350,21 @@ export default function CameraFeed({
     const now = Date.now();
     let activeSubjectLabel = lastMatch;
 
-    if (!activeSubjectLabel && activePresenceMapRef.current) {
+    if ((!activeSubjectLabel || activeSubjectLabel.startsWith('LEFT:')) && activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
+        const freshDets = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 3000);
+        if (freshDets.length > 0) {
+            const topDet = freshDets.find(d => d.label?.includes('UNAUTHORIZED') || d.label?.includes('INTRUDER')) || freshDets[0];
+            if (topDet.label?.includes('UNAUTHORIZED') || topDet.label?.includes('INTRUDER')) {
+                activeSubjectLabel = 'INTRUDER DETECTED';
+            } else if (topDet.label) {
+                activeSubjectLabel = topDet.label.replace('FACE: ', 'TARGET: ');
+            }
+        }
+    }
+
+    if ((!activeSubjectLabel || activeSubjectLabel.startsWith('LEFT:')) && activePresenceMapRef.current) {
         for (const [key, presence] of activePresenceMapRef.current.entries()) {
-            if (presence && (now - presence.lastSeen) < 2500) {
+            if (presence && (now - presence.lastSeen) < 3000) {
                 if (key.startsWith('INTRUDER_') || presence.subjectName === 'UNAUTHORIZED PERSON') {
                     activeSubjectLabel = 'INTRUDER DETECTED';
                     break;
@@ -1309,18 +1375,6 @@ export default function CameraFeed({
                     activeSubjectLabel = `PLATE: ${presence.subjectName}`;
                     break;
                 }
-            }
-        }
-    }
-
-    if (!activeSubjectLabel && activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
-        const freshDets = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 2500);
-        if (freshDets.length > 0) {
-            const topDet = freshDets[0];
-            if (topDet.label?.includes('UNAUTHORIZED')) {
-                activeSubjectLabel = 'INTRUDER DETECTED';
-            } else if (topDet.label) {
-                activeSubjectLabel = topDet.label.replace('FACE: ', 'TARGET: ');
             }
         }
     }
