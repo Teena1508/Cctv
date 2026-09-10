@@ -1024,7 +1024,6 @@ export default function CameraFeed({
 
                                     cropEvaluations.push({
                                         crop,
-                                        skinRatio,
                                         bestMatch,
                                         maxScore
                                     });
