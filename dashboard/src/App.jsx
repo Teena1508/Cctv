@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import CameraFeed from './components/CameraFeed';
+import CctvModal from './components/CctvModal';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -7,7 +8,7 @@ import { CURRENT_NODE_LOCATION } from './config/location';
 
 import {
   Shield, Bell, Radio, MapPin, UserPlus,
-  AlertOctagon, RefreshCw, Layers, CheckCircle, Clock, Car, Camera, Trash2
+  AlertOctagon, RefreshCw, Layers, CheckCircle, Clock, Car, Camera, Trash2, Wifi
 } from 'lucide-react';
 
 // Marker Icons Setup
@@ -307,6 +308,28 @@ export default function App() {
 
   const [toastMessage, setToastMessage] = useState(null);
 
+  // CCTV Camera IP Address & Fog Cluster Stream State
+  const [showCctvModal, setShowCctvModal] = useState(false);
+  const [cctvIp, setCctvIp] = useState('192.168.1.100');
+  const [cctvStreamUrl, setCctvStreamUrl] = useState(null);
+  const [cctvCameraName, setCctvCameraName] = useState('CAM_01 // CCTV_NODE');
+
+  const handleCctvConnect = ({ ip, streamUrl, cameraName }) => {
+    setCctvIp(ip);
+    setCctvStreamUrl(streamUrl);
+    if (cameraName) setCctvCameraName(cameraName);
+    setShowCctvModal(false);
+    setToastMessage({ type: 'success', text: `📡 CCTV IP Camera Connected (${ip})` });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const handleCctvUseWebcam = () => {
+    setCctvStreamUrl(null);
+    setShowCctvModal(false);
+    setToastMessage({ type: 'info', text: '📹 Switched to Laptop Webcam Feed' });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
   // Dynamic Geolocation state (Tracks current physical laptop location)
   const defaultLat = Number(CURRENT_NODE_LOCATION.lat) || 28.6139;
   const defaultLng = Number(CURRENT_NODE_LOCATION.lng) || 77.2090;
@@ -480,9 +503,9 @@ export default function App() {
   // HANDLER: Continuous Feed with Detection & Off-Hours Restricted Zone Rules Evaluator
   const handleDetection = (detection) => {
     const activeRestrictedRules = restrictedRulesRef.current.filter(r => r.enabled);
-    const isUnauthorizedPerson = detection.subject === 'UNAUTHORIZED PERSON' || 
-                                  detection.subject?.includes('UNAUTHORIZED') || 
-                                  detection.eventType === 'UNAUTHORIZED PRESENCE';
+    const isUnauthorizedPerson = detection.subject === 'UNAUTHORIZED PERSON' ||
+      detection.subject?.includes('UNAUTHORIZED') ||
+      detection.eventType === 'UNAUTHORIZED PRESENCE';
 
     // 1. Silent Camera Mode: Allow detection if enrolled targets, enrolled plates, active restricted rules exist, OR if an un-enrolled intruder is detected!
     if (enrolledTargets.length === 0 && enrolledPlates.length === 0 && activeRestrictedRules.length === 0 && !isUnauthorizedPerson) {
@@ -789,8 +812,11 @@ export default function App() {
               CLIENT-SIDE ENGINE
             </button>
             <button
-              onClick={() => setEngineMode('FOG-CLUSTER')}
-              className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${engineMode === 'FOG-CLUSTER' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
+              onClick={() => {
+                setEngineMode('FOG-CLUSTER');
+                setShowCctvModal(true);
+              }}
+              className={`px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${engineMode === 'FOG-CLUSTER' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400'}`}
             >
               FOG-CLUSTER ENGINE
             </button>
@@ -853,14 +879,26 @@ export default function App() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full">
             {/* Center Main Feed - Big Fixed Landscape */}
             <div className="lg:col-span-8 flex flex-col gap-4">
-              <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-                <Radio className="w-4 h-4 text-blue-400" />
-                Primary Camera Feed
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-blue-400" />
+                  Primary Camera Feed {cctvStreamUrl ? `(CCTV IP: ${cctvIp})` : ''}
+                </h2>
+                <button
+                  onClick={() => setShowCctvModal(true)}
+                  className="px-3 py-1.5 rounded-lg bg-blue-950/80 hover:bg-blue-900 border border-blue-600/40 text-blue-300 text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
+                >
+                  <Wifi className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
+                  Configure CCTV IP
+                </button>
+              </div>
               <div className="bg-slate-950 border border-slate-900 rounded-2xl overflow-hidden p-2 flex flex-col items-center justify-center">
                 <CameraFeed
                   cameraId="CAM_01"
-                  cameraName="LOCAL_LAPTOP_NODE"
+                  cameraName={cctvCameraName}
+                  cctvIp={cctvIp}
+                  streamUrl={cctvStreamUrl}
+                  onConfigureCctvClick={() => setShowCctvModal(true)}
                   latitude={laptopLocation ? laptopLocation[0] : CURRENT_NODE_LOCATION.lat}
                   longitude={laptopLocation ? laptopLocation[1] : CURRENT_NODE_LOCATION.lng}
                   enrolledTargets={enrolledTargets}
@@ -1341,7 +1379,7 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-slate-900 pb-3">
               <h2 className="text-base font-bold tracking-wider text-slate-200 uppercase flex items-center gap-2">
                 <Bell className="w-5 h-5 text-blue-400" />
-                Interactive Telemetry & Video Clip Recordings Feed
+                Alerts Feed
               </h2>
               {engineMode === 'CLIENT-SIDE' && localAlerts.length > 0 && (
                 <button
@@ -1409,11 +1447,28 @@ export default function App() {
 
 
 
+      {/* CCTV IP Address Configuration Modal */}
+      <CctvModal
+        isOpen={showCctvModal}
+        onClose={() => setShowCctvModal(false)}
+        onConnect={handleCctvConnect}
+        onUseWebcam={handleCctvUseWebcam}
+        currentStreamUrl={cctvStreamUrl}
+        currentIp={cctvIp}
+        currentCameraName={cctvCameraName}
+      />
+
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 bg-slate-900 border border-emerald-800 text-emerald-400 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 z-50">
-          <CheckCircle className="w-5 h-5 text-emerald-400" />
-          <span className="text-xs font-bold">{toastMessage}</span>
+        <div className={`fixed bottom-6 right-6 bg-slate-900 border px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 z-50 animate-in fade-in duration-200 ${
+          (typeof toastMessage === 'object' && toastMessage?.type === 'info')
+            ? 'border-blue-800 text-blue-300'
+            : 'border-emerald-800 text-emerald-400'
+        }`}>
+          <CheckCircle className="w-5 h-5" />
+          <span className="text-xs font-bold font-mono">
+            {typeof toastMessage === 'object' ? toastMessage.text : toastMessage}
+          </span>
         </div>
       )}
     </div>

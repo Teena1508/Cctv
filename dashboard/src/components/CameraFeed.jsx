@@ -158,6 +158,74 @@ function hasFaceStructure(imgSource, cropBox) {
     }
 }
 
+function findDynamicFaceCrops(imgSource) {
+    try {
+        if (!sharedStructureCanvas) return [];
+        const sampleW = 120;
+        const sampleH = 90;
+        if (sharedStructureCanvas.width !== sampleW || sharedStructureCanvas.height !== sampleH) {
+            sharedStructureCanvas.width = sampleW;
+            sharedStructureCanvas.height = sampleH;
+        }
+        const ctx = sharedStructureCanvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return [];
+
+        ctx.drawImage(imgSource, 0, 0, sampleW, sampleH);
+        const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
+        let minX = sampleW, maxX = 0, minY = sampleH, maxY = 0;
+        let skinCount = 0;
+        const totalPixels = sampleW * sampleH;
+
+        for (let y = 0; y < sampleH; y++) {
+            for (let x = 0; x < sampleW; x++) {
+                const idx = (y * sampleW + x) * 4;
+                const r = imgData[idx];
+                const g = imgData[idx + 1];
+                const b = imgData[idx + 2];
+
+                const isSkin = (r > 60 && g > 40 && b > 20 &&
+                    (Math.max(r, g, b) - Math.min(r, g, b) > 12) &&
+                    r > g && r > b) ||
+                    ((128 - 0.168 * r - 0.331 * g + 0.500 * b >= 70) &&
+                     (128 - 0.168 * r - 0.331 * g + 0.500 * b <= 135) &&
+                     (128 + 0.500 * r - 0.418 * g - 0.081 * b >= 115) &&
+                     (128 + 0.500 * r - 0.418 * g - 0.081 * b <= 180));
+
+                if (isSkin) {
+                    skinCount++;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+
+        // If skin coverage is too low (<3%) or too high (>75%, e.g. palm over lens), return no face
+        if (skinCount < (totalPixels * 0.03) || skinCount > (totalPixels * 0.75)) return [];
+
+        const bw = maxX - minX;
+        const bh = maxY - minY;
+
+        if (bw < sampleW * 0.08 || bh < sampleH * 0.08) return [];
+
+        const cropBox = {
+            x: Math.max(0, (minX - 1) / sampleW),
+            y: Math.max(0, (minY - 1) / sampleH),
+            w: Math.min(1.0, (bw + 2) / sampleW),
+            h: Math.min(1.0, (bh + 2) / sampleH)
+        };
+
+        if (hasFaceStructure(imgSource, cropBox)) {
+            return [cropBox];
+        }
+        return [];
+    } catch (e) {
+        return [];
+    }
+}
+
 const targetSignatureCache = new Map();
 
 function getCanvasImageSignature(imgSource, targetWidth = 24, targetHeight = 24, cropBox = null) {
@@ -266,10 +334,12 @@ export default function CameraFeed({
     latitude = null,
     longitude = null,
     streamUrl = null,
+    cctvIp = null,
     enrolledTargets = [],
     enrolledPlates = [],
     onDetection = null,
-    onLocationClick = null
+    onLocationClick = null,
+    onConfigureCctvClick = null
 }) {
     const videoRef = useRef(null);
     const imgRef = useRef(null);
@@ -727,22 +797,8 @@ export default function CameraFeed({
                                     }
                                 }
 
-                                let isSyntheticGrid = false;
                                 if (candidateCrops.length === 0) {
-                                    isSyntheticGrid = true;
-                                    const testRegions = [
-                                        { x: 0.05, y: 0.10, w: 0.45, h: 0.75 }, // Left person
-                                        { x: 0.25, y: 0.10, w: 0.50, h: 0.75 }, // Center person
-                                        { x: 0.50, y: 0.10, w: 0.45, h: 0.75 }, // Right person
-                                        { x: 0.15, y: 0.05, w: 0.40, h: 0.65 }, // Center-left upper
-                                        { x: 0.45, y: 0.05, w: 0.40, h: 0.65 }, // Center-right upper
-                                        { x: 0.10, y: 0.10, w: 0.80, h: 0.80 }, // Full frame
-                                    ];
-                                    for (const reg of testRegions) {
-                                        if (getCropSkinRatio(mediaSource, reg) >= 0.06 && hasFaceStructure(mediaSource, reg)) {
-                                            candidateCrops.push(reg);
-                                        }
-                                    }
+                                    candidateCrops = findDynamicFaceCrops(mediaSource);
                                 }
 
                                 let matchedTargetInFrame = false;
@@ -954,10 +1010,10 @@ export default function CameraFeed({
                 const presenceMap = activePresenceMapRef.current;
                 const existingActiveTracks = activeDetectionsRef.current || [];
 
-                // Keep presence refreshed ONLY if that specific subject's active spatial detection box is on screen
-                if (existingActiveTracks.length > 0) {
+                // Keep presence refreshed ONLY if that specific subject was detected in current frame
+                if (newDetections.length > 0) {
                     for (const [subjKey, presence] of presenceMap.entries()) {
-                        const isMatchedTrackActive = existingActiveTracks.some(t => {
+                        const isMatchedInNewFrame = newDetections.some(t => {
                             if (subjKey.startsWith('PLATE_')) {
                                 return t.type === 'PLATE' && (t.label.includes(presence.subjectName) || t.label.includes(subjKey.replace('PLATE_', '')));
                             }
@@ -971,18 +1027,17 @@ export default function CameraFeed({
                             return false;
                         });
 
-                        if (isMatchedTrackActive) {
+                        if (isMatchedInNewFrame) {
                             presence.lastSeen = checkNow;
                         }
                     }
                 }
 
                 for (const [subjKey, presence] of presenceMap.entries()) {
-                    // Departure detection: 800ms of true absence after leaving frame.
-                    const isScanInFlight = isScanningFaceRef.current || isScanningPlateRef.current;
+                    // Departure detection: 600ms of true absence after leaving frame.
                     const absenceDuration = checkNow - presence.lastSeen;
 
-                    if (absenceDuration > 800 && !isScanInFlight) {
+                    if (absenceDuration > 600) {
                         presenceMap.delete(subjKey);
 
                         const exactTime = formatExactTimestamp(new Date());
@@ -1080,10 +1135,10 @@ export default function CameraFeed({
                     }
                 });
 
-                // 4.4 Hysteresis grace period: retain active tracks for 1200ms of inactivity to eliminate box drop-out & flickering
+                // 4.4 Hysteresis grace period: retain active tracks for 300ms of inactivity to eliminate box drop-out & flickering
                 existingTracks.forEach((track, tIdx) => {
                     if (!claimedTracks.has(tIdx)) {
-                        if ((now - (track.lastSeen || now)) < 1200) {
+                        if ((now - (track.lastSeen || now)) < 300) {
                             track.missedFrames = (track.missedFrames || 0) + 1;
                             updatedTracks.push(track);
                         }
@@ -1278,7 +1333,7 @@ export default function CameraFeed({
             >
                 <div className="flex items-center gap-1.5 text-cyan-400 font-bold mb-0.5">
                     <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
-                    {cameraId} // {cameraName}
+                    {streamUrl ? `📡 CCTV IP: ${cctvIp || 'ACTIVE STREAM'}` : `${cameraId} // ${cameraName}`}
                 </div>
                 <div className="flex items-center gap-1 text-slate-400 group-hover:text-blue-400 font-semibold transition-colors">
                     <MapPin className="w-3.5 h-3.5 text-blue-500 group-hover:animate-bounce" />

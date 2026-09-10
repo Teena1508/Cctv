@@ -90,21 +90,24 @@ def is_valid_face_crop(img, x, y, w, h):
     if img is None:
         return False
     img_h, img_w = img.shape[:2]
-    if w < 20 or h < 20 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
+    if w < 15 or h < 15 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
         return False
     aspect = float(w) / float(h)
-    if aspect < 0.40 or aspect > 1.85:
+    if aspect < 0.35 or aspect > 2.0:
         return False
 
     crop = img[y:y+h, x:x+w]
     if crop.size == 0:
         return False
     if len(crop.shape) == 3:
-        ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
-        mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
-        skin_ratio = np.sum(mask > 0) / float(mask.size)
-        if skin_ratio < 0.05:
-            return False
+        try:
+            ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
+            mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
+            skin_ratio = np.sum(mask > 0) / float(mask.size)
+            if skin_ratio < 0.02:
+                return False
+        except Exception:
+            pass
     return True
 
 # 2. Smart Face Analyzer with InsightFace & Haar Fallback
@@ -161,8 +164,7 @@ class SmartFaceAnalyzer:
         if self.real_analyzer is not None:
             try:
                 faces = self.real_analyzer.get(img)
-                if faces and len(faces) > 0:
-                    return faces
+                return faces if faces is not None else []
             except Exception as e:
                 print(f"[SmartFaceAnalyzer] InsightFace get() error: {e}. Attempting fallback...")
                 self.real_analyzer = None
