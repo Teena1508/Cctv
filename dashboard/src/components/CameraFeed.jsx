@@ -768,15 +768,6 @@ export default function CameraFeed({
                         if (response.ok) {
                             setAiBackendOffline(false);
                             const data = await response.json();
-                            if (data.frame_id) {
-                                if (data.frame_id < lastProcessedPlateFrameRef.current - 10) {
-                                    lastProcessedPlateFrameRef.current = data.frame_id;
-                                } else if (data.frame_id < lastProcessedPlateFrameRef.current) {
-                                    return;
-                                } else {
-                                    lastProcessedPlateFrameRef.current = data.frame_id;
-                                }
-                            }
 
                             if (data.results && data.results.length > 0) {
                                 data.results.forEach((item) => {
@@ -837,6 +828,7 @@ export default function CameraFeed({
 
                     try {
                         let backendAvailable = false;
+                        let backendMatchesFound = false;
                         let backendData = null;
 
                         if (canQueryBackend) {
@@ -856,91 +848,85 @@ export default function CameraFeed({
                                     signal: controller.signal
                                 });
 
-                            if (response.ok) {
-                                backendAvailable = true;
-                                setAiBackendOffline(false);
-                                backendData = await response.json();
-                                const data = backendData;
-                                if (data.frame_id) {
-                                    if (data.frame_id < lastProcessedFaceFrameRef.current - 10) {
-                                        lastProcessedFaceFrameRef.current = data.frame_id;
-                                    } else if (data.frame_id < lastProcessedFaceFrameRef.current) {
-                                        return;
-                                    } else {
-                                        lastProcessedFaceFrameRef.current = data.frame_id;
+                                if (response.ok) {
+                                    backendAvailable = true;
+                                    setAiBackendOffline(false);
+                                    backendData = await response.json();
+                                    const data = backendData;
+
+                                    if (data.matches && data.matches.length > 0) {
+                                        backendMatchesFound = true;
+                                        data.matches.forEach((face) => {
+                                            const exactTime = formatExactTimestamp(new Date());
+                                            const targetName = face.name || face.label || 'UNKNOWN';
+                                            const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN' || targetName.includes('UNAUTHORIZED') || targetName.includes('INTRUDER');
+
+                                            const rawConf = face.confidence 
+                                                ? (face.confidence <= 1.0 ? Math.round(face.confidence * 100) : Math.round(face.confidence))
+                                                : (isUnauthorized ? 88 : 95);
+                                            const confPercent = isUnauthorized ? Math.max(85, rawConf) : Math.max(88, rawConf);
+
+                                            setLastMatch(isUnauthorized ? 'INTRUDER DETECTED' : `TARGET: ${targetName}`);
+
+                                            if (face.bbox) {
+                                                const unscaledBbox = [
+                                                    Math.round(face.bbox[0] * scaleX),
+                                                    Math.round(face.bbox[1] * scaleY),
+                                                    Math.round(face.bbox[2] * scaleX),
+                                                    Math.round(face.bbox[3] * scaleY)
+                                                ];
+                                                newDetections.push({
+                                                    type: 'FACE',
+                                                    label: isUnauthorized ? `FACE: UNAUTHORIZED PERSON` : `FACE: ${targetName}`,
+                                                    bbox: unscaledBbox,
+                                                    confidence: confPercent,
+                                                    timestamp: currentTimestamp
+                                                });
+                                            }
+
+                                            const intruderKey = `INTRUDER_${cameraId}`;
+                                            const normalizedSubject = isUnauthorized ? 'UNAUTHORIZED PERSON' : targetName;
+
+                                            handlePresenceLifecycle(isUnauthorized ? intruderKey : `FACE_${targetName}`, {
+                                                id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                                                eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
+                                                subject: normalizedSubject,
+                                                details: isUnauthorized
+                                                    ? `Unenrolled person spotted in live camera feed on ${cameraId}`
+                                                    : `High-precision facial match identified on ${cameraId}`,
+                                                lat: activeLoc.lat,
+                                                lng: activeLoc.lng,
+                                                address: activeLoc.address,
+                                                cameraId: cameraId,
+                                                cameraName: cameraName,
+                                                timestamp: exactTime,
+                                                confidence: confPercent,
+                                                severity: isUnauthorized ? 'HIGH' : 'CRITICAL',
+                                            });
+                                        });
                                     }
                                 }
-
-                                if (data.matches && data.matches.length > 0) {
-                                    data.matches.forEach((face) => {
-                                        const exactTime = formatExactTimestamp(new Date());
-                                        const targetName = face.name || face.label || 'UNKNOWN';
-                                        const isUnauthorized = targetName === 'UNAUTHORIZED PERSON' || targetName === 'UNKNOWN' || targetName.includes('UNAUTHORIZED') || targetName.includes('INTRUDER');
-
-                                        const rawConf = face.confidence 
-                                            ? (face.confidence <= 1.0 ? Math.round(face.confidence * 100) : Math.round(face.confidence))
-                                            : (isUnauthorized ? 88 : 95);
-                                        const confPercent = isUnauthorized ? Math.max(85, rawConf) : Math.max(88, rawConf);
-
-                                        setLastMatch(isUnauthorized ? 'INTRUDER DETECTED' : `TARGET: ${targetName}`);
-
-                                        if (face.bbox) {
-                                            const unscaledBbox = [
-                                                Math.round(face.bbox[0] * scaleX),
-                                                Math.round(face.bbox[1] * scaleY),
-                                                Math.round(face.bbox[2] * scaleX),
-                                                Math.round(face.bbox[3] * scaleY)
-                                            ];
-                                            newDetections.push({
-                                                type: 'FACE',
-                                                label: isUnauthorized ? `FACE: UNAUTHORIZED PERSON` : `FACE: ${targetName}`,
-                                                bbox: unscaledBbox,
-                                                confidence: confPercent,
-                                                timestamp: currentTimestamp
-                                            });
-                                        }
-
-                                        const intruderKey = `INTRUDER_${cameraId}`;
-                                        const normalizedSubject = isUnauthorized ? 'UNAUTHORIZED PERSON' : targetName;
-
-                                        handlePresenceLifecycle(isUnauthorized ? intruderKey : `FACE_${targetName}`, {
-                                            id: `ALERT_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                                            eventType: isUnauthorized ? 'UNAUTHORIZED PRESENCE' : 'TARGET MATCH',
-                                            subject: normalizedSubject,
-                                            details: isUnauthorized
-                                                ? `Unenrolled person spotted in live camera feed on ${cameraId}`
-                                                : `High-precision facial match identified on ${cameraId}`,
-                                            lat: activeLoc.lat,
-                                            lng: activeLoc.lng,
-                                            address: activeLoc.address,
-                                            cameraId: cameraId,
-                                            cameraName: cameraName,
-                                            timestamp: exactTime,
-                                            confidence: confPercent,
-                                            severity: isUnauthorized ? 'HIGH' : 'CRITICAL',
-                                        });
-                                    });
-                                }
+                            } catch (backendErr) {
+                                backendAvailable = false;
+                            } finally {
+                                if (typeof timeoutId !== 'undefined') clearTimeout(timeoutId);
                             }
-                        } catch (backendErr) {
-                            backendAvailable = false;
-                        } finally {
-                            if (typeof timeoutId !== 'undefined') clearTimeout(timeoutId);
                         }
-                    }
 
-                        // Browser AI Scanner Fallback: Runs ONLY when backend server is offline
-                        if (!backendAvailable) {
+                        // Browser AI Scanner Fallback: Runs when backend is offline OR returned no matches
+                        if (!backendMatchesFound) {
                             const mediaSource = videoRef.current || imgRef.current;
                             if (mediaSource) {
                                 const targetList = typeof targets === 'string' ? JSON.parse(targets || '[]') : targets;
                                 let candidateCrops = [];
+                                let fromNativeDetector = false;
 
                                 if ('FaceDetector' in window) {
                                     try {
                                         const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 10 });
                                         const results = await detector.detect(mediaSource);
                                         if (results && results.length > 0) {
+                                            fromNativeDetector = true;
                                             candidateCrops = results.map(f => ({
                                                 x: Math.max(0, f.boundingBox.x / srcWidth),
                                                 y: Math.max(0, f.boundingBox.y / srcHeight),
@@ -961,8 +947,10 @@ export default function CameraFeed({
                                 const cropEvaluations = [];
 
                                 for (const crop of candidateCrops) {
-                                    const skinRatio = getCropSkinRatio(mediaSource, crop);
-                                    if (skinRatio < 0.03) continue;
+                                    if (!fromNativeDetector) {
+                                        const skinRatio = getCropSkinRatio(mediaSource, crop);
+                                        if (skinRatio < 0.01) continue;
+                                    }
                                     if (!hasFaceStructure(mediaSource, crop)) continue;
 
                                     const frameSig = getCanvasImageSignature(mediaSource, 24, 24, crop);
