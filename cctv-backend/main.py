@@ -61,8 +61,8 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "false").lower() == "true"
 
 # Person / Face Detection & Temporal Confirmation Thresholds
-FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.45"))
-FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.33"))
+FACE_DET_SCORE_THRESHOLD = float(os.getenv("FACE_DET_SCORE_THRESHOLD", "0.30"))
+FACE_MATCH_SIM_THRESHOLD = float(os.getenv("FACE_MATCH_SIM_THRESHOLD", "0.38"))
 PERSON_CONFIRM_N = int(os.getenv("PERSON_CONFIRM_N", "1"))      # Require N out of M frames to confirm presence
 PERSON_WINDOW_M = int(os.getenv("PERSON_WINDOW_M", "5"))       # M sliding window frame count
 PERSON_ABSENT_K = int(os.getenv("PERSON_ABSENT_K", "3"))       # K consecutive absent frames to mark absent
@@ -90,10 +90,10 @@ def is_valid_face_crop(img, x, y, w, h):
     if img is None:
         return False
     img_h, img_w = img.shape[:2]
-    if w < 15 or h < 15 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
+    if w < 8 or h < 8 or x < 0 or y < 0 or (x + w) > img_w or (y + h) > img_h:
         return False
     aspect = float(w) / float(h)
-    if aspect < 0.35 or aspect > 2.0:
+    if aspect < 0.20 or aspect > 2.8:
         return False
 
     crop = img[y:y+h, x:x+w]
@@ -102,9 +102,9 @@ def is_valid_face_crop(img, x, y, w, h):
     if len(crop.shape) == 3:
         try:
             ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
-            mask = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
+            mask = cv2.inRange(ycrcb, (0, 130, 75), (255, 175, 130))
             skin_ratio = np.sum(mask > 0) / float(mask.size)
-            if skin_ratio < 0.02:
+            if skin_ratio < 0.005:
                 return False
         except Exception:
             pass
@@ -245,14 +245,27 @@ def get_target_embedding(target):
     resized_img, _ = resize_for_face_detection(img)
     faces = face_analyzer.get(resized_img)
 
-    # 1. Padded border fallback: InsightFace det_10g requires surrounding context for tight face crops
+    # 1. Padded CONSTANT border fallback: InsightFace det_10g requires surrounding context for tight face crops
     if not faces and resized_img is not None:
         h, w = resized_img.shape[:2]
-        pad_h, pad_w = max(40, h), max(40, w)
-        padded = cv2.copyMakeBorder(resized_img, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REFLECT)
+        pad_h, pad_w = max(100, h), max(100, w)
+        padded = cv2.copyMakeBorder(resized_img, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_CONSTANT, value=[128, 128, 128])
         faces = face_analyzer.get(padded)
 
-    # 2. Direct ArcFace recognition feature extraction for tight face crops
+    # 2. Pick face closest to original image center to avoid mirrored reflections
+    if faces and resized_img is not None:
+        h, w = resized_img.shape[:2]
+        cx, cy = w / 2.0, h / 2.0
+        best_face = min(faces, key=lambda f: (( (f.bbox[0]+f.bbox[2])/2.0 - cx )**2 + ( (f.bbox[1]+f.bbox[3])/2.0 - cy )**2))
+        embedding = best_face.embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        target_cache[image_src] = embedding
+        print(f"[Face Ingest] ✅ Cached high-precision embedding for target: '{name}' (Vector Dim: {len(embedding)})")
+        return embedding
+
+    # 3. Direct ArcFace recognition feature extraction for tight face crops
     if not faces and resized_img is not None and face_analyzer.real_analyzer is not None:
         try:
             if hasattr(face_analyzer.real_analyzer, 'models') and 'recognition' in face_analyzer.real_analyzer.models:
@@ -265,65 +278,21 @@ def get_target_embedding(target):
                         norm = np.linalg.norm(feat_vec)
                         if norm > 0:
                             feat_vec = feat_vec / norm
-                        class DirectArcFaceTarget:
-                            def __init__(self, emb):
-                                self.bbox = np.array([0, 0, resized_img.shape[1], resized_img.shape[0]])
-                                self.embedding = emb
-                        faces = [DirectArcFaceTarget(feat_vec)]
+                        target_cache[image_src] = feat_vec
+                        print(f"[Face Ingest] ✅ Cached direct ArcFace embedding for target: '{name}' (Vector Dim: {len(feat_vec)})")
+                        return feat_vec
         except Exception as ex:
             print(f"[Face Ingest] Direct ArcFace extraction warning for '{name}': {ex}")
 
-    # 3. Contrast enhancement fallback (CLAHE)
-    if not faces and resized_img is not None and len(resized_img.shape) == 3:
-        lab = cv2.cvtColor(resized_img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        enhanced_lab = cv2.merge((cl, a, b))
-        enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
-        faces = face_analyzer.get(enhanced_bgr)
-
-    if not faces and resized_img is not None:
-        h, w = resized_img.shape[:2]
-        fx, fy, fw, fh = int(w * 0.15), int(h * 0.10), int(w * 0.70), int(h * 0.80)
-        gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) if len(resized_img.shape) == 3 else resized_img
-        face_crop = gray[fy:fy+fh, fx:fx+fw]
-        if face_crop.size > 0:
-            resized = cv2.resize(face_crop, (16, 16), interpolation=cv2.INTER_AREA)
-            sig_256 = resized.flatten().astype(np.float32) / 255.0
-            mean = np.mean(sig_256)
-            std = np.std(sig_256)
-            if std > 1e-4:
-                sig_256 = (sig_256 - mean) / std
-            else:
-                sig_256 = sig_256 - mean
-            sig_512 = np.concatenate([sig_256, sig_256])
-            class FallbackFace:
-                def __init__(self):
-                    self.bbox = np.array([fx, fy, fx+fw, fy+fh])
-                    self.embedding = sig_512
-            faces = [FallbackFace()]
-                
-    if not faces:
-        return None
-        
-    largest_face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-    embedding = largest_face.embedding
-    norm = np.linalg.norm(embedding)
-    if norm > 0:
-        embedding = embedding / norm
-        
-    target_cache[image_src] = embedding
-    print(f"[Face Ingest] ✅ Cached embedding for target: '{name}' (Vector Dim: {len(embedding)})")
-    return embedding
+    return None
 
 def calibrate_similarity_confidence(sim):
     if sim is None:
         return 0.92
-    if sim < 0.25:
+    if sim < 0.38:
         return round(float(sim), 3)
-    # Map raw cosine sim [0.30, 0.65] to calibrated match confidence [0.88, 0.99]
-    norm_score = 0.88 + (min(0.65, max(0.30, float(sim))) - 0.30) / 0.35 * 0.11
+    # Map raw cosine sim [0.38, 0.95] to calibrated match confidence [0.88, 0.99]
+    norm_score = 0.88 + (min(0.95, max(0.38, float(sim))) - 0.38) / 0.57 * 0.11
     return round(float(norm_score), 3)
 
 # =========================================================================
@@ -421,8 +390,7 @@ class TemporalTracker:
 
                 track = self.tracks[best_track_id]
                 track["last_bbox"] = bbox
-                if name != "UNAUTHORIZED PERSON" or track["name"] == "UNAUTHORIZED PERSON":
-                    track["name"] = name
+                track["name"] = name
                 track["window"].append(True)
                 track["absent_count"] = 0
                 updated_track_ids.add(best_track_id)
@@ -667,6 +635,12 @@ def scan_face(
         processed_frame, scale = resize_for_face_detection(frame, max_size=640)
         faces = face_analyzer.get(processed_frame)
         
+        # Multi-resolution fallback if downscaled frame returned 0 faces
+        if not faces and frame is not None:
+            faces = face_analyzer.get(frame)
+            if faces:
+                scale = 1.0
+
         raw_matches = []
         is_fallback = face_analyzer.real_analyzer is None
         
@@ -682,7 +656,8 @@ def scan_face(
             rx1, ry1, rx2, ry2 = int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3])
             rw, rh = rx2 - rx1, ry2 - ry1
 
-            if not is_valid_face_crop(processed_frame, rx1, ry1, rw, rh):
+            target_img = processed_frame if scale < 0.99 else frame
+            if not is_valid_face_crop(target_img, rx1, ry1, rw, rh):
                 continue
 
             orig_bbox = [
@@ -741,6 +716,8 @@ def scan_face(
                     "confidence": unauth_conf,
                     "bbox": orig_bbox
                 })
+
+
 
         # Apply Temporal Confirmation Tracker
         confirmed_matches = tracker.update_face_tracks(frame_id, raw_matches)

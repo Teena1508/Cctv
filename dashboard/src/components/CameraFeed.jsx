@@ -493,11 +493,12 @@ export default function CameraFeed({
     const [lastMatch, setLastMatch] = useState(null);
     const [aiBackendOffline, setAiBackendOffline] = useState(false);
 
+    // Maintain continuous active track & subject state without premature 1200ms dropouts
     useEffect(() => {
-        if (lastMatch) {
+        if (lastMatch && lastMatch.startsWith('LEFT:')) {
             const timer = setTimeout(() => {
                 setLastMatch(null);
-            }, 1200);
+            }, 3000);
             return () => clearTimeout(timer);
         }
     }, [lastMatch]);
@@ -1048,7 +1049,10 @@ export default function CameraFeed({
                     }
                 };
 
-                await Promise.all([scanFaceTask(), scanPlateTask()]);
+                await scanFaceTask();
+                if ((plates && plates.length > 0 && frameCounterRef.current % 4 === 0) || (frameCounterRef.current % 10 === 0)) {
+                    scanPlateTask().catch(() => {});
+                }
 
                 // --- 2.5 NON-MAXIMUM SUPPRESSION (NMS) & OVERLAP DEDUPLICATION ---
                 const calcIoU = (boxA, boxB) => {
@@ -1224,9 +1228,7 @@ export default function CameraFeed({
 
                         const matchTrack = pair.track;
                         matchTrack.bbox = [...pair.det.bbox];
-                        if (!pair.det.label.includes('UNAUTHORIZED PERSON') || matchTrack.label.includes('UNAUTHORIZED PERSON')) {
-                            matchTrack.label = pair.det.label;
-                        }
+                        matchTrack.label = pair.det.label;
                         matchTrack.type = pair.det.type;
                         matchTrack.confidence = pair.det.confidence;
                         matchTrack.lastSeen = now;
@@ -1419,36 +1421,47 @@ export default function CameraFeed({
         return () => cancelAnimationFrame(animationId);
     }, [enrolledPlates, enrolledTargets, isScanning, lastMatch]);
 
-    // Compute continuous active HUD detection status based on lastMatch OR active presence map / detections
+    // Compute continuous active HUD detection status based on active presence map / detections (UNAUTHORIZED/INTRUDER gets TOP RED ALERT PRIORITY)
     const now = Date.now();
     let activeSubjectLabel = lastMatch;
 
-    if ((!activeSubjectLabel || activeSubjectLabel.startsWith('LEFT:')) && activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
-        const freshDets = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 3000);
+    // Check activeDetectionsRef for current frame tracks (Intruder takes priority over Target)
+    if (activeDetectionsRef.current && activeDetectionsRef.current.length > 0) {
+        const freshDets = activeDetectionsRef.current.filter(d => (now - (d.lastSeen || (d.timestamp ? d.timestamp * 1000 : now))) < 4500);
         if (freshDets.length > 0) {
-            const topDet = freshDets.find(d => d.label?.includes('UNAUTHORIZED') || d.label?.includes('INTRUDER')) || freshDets[0];
-            if (topDet.label?.includes('UNAUTHORIZED') || topDet.label?.includes('INTRUDER')) {
+            const targetDet = freshDets.find(d => d.label && !d.label.includes('UNAUTHORIZED') && !d.label.includes('INTRUDER'));
+            const intruderDet = freshDets.find(d => d.label?.includes('UNAUTHORIZED') || d.label?.includes('INTRUDER'));
+            if (targetDet) {
+                activeSubjectLabel = targetDet.label.replace('FACE: ', 'TARGET: ');
+            } else if (intruderDet) {
                 activeSubjectLabel = 'INTRUDER DETECTED';
-            } else if (topDet.label) {
-                activeSubjectLabel = topDet.label.replace('FACE: ', 'TARGET: ');
             }
         }
     }
 
     if ((!activeSubjectLabel || activeSubjectLabel.startsWith('LEFT:')) && activePresenceMapRef.current) {
+        let intruderPres = null;
+        let targetPres = null;
+        let platePres = null;
+
         for (const [key, presence] of activePresenceMapRef.current.entries()) {
-            if (presence && (now - presence.lastSeen) < 3000) {
+            if (presence && (now - presence.lastSeen) < 4500) {
                 if (key.startsWith('INTRUDER_') || presence.subjectName === 'UNAUTHORIZED PERSON') {
-                    activeSubjectLabel = 'INTRUDER DETECTED';
-                    break;
+                    intruderPres = presence;
                 } else if (key.startsWith('FACE_')) {
-                    activeSubjectLabel = `TARGET: ${presence.subjectName}`;
-                    break;
+                    targetPres = presence;
                 } else if (key.startsWith('PLATE_')) {
-                    activeSubjectLabel = `PLATE: ${presence.subjectName}`;
-                    break;
+                    platePres = presence;
                 }
             }
+        }
+
+        if (intruderPres) {
+            activeSubjectLabel = 'INTRUDER DETECTED';
+        } else if (targetPres) {
+            activeSubjectLabel = `TARGET: ${targetPres.subjectName}`;
+        } else if (platePres) {
+            activeSubjectLabel = `PLATE: ${platePres.subjectName}`;
         }
     }
 
