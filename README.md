@@ -3,6 +3,11 @@
 A real-time, edge-assisted AI surveillance dashboard and analytics engine for automated threat detection, facial recognition, license plate recognition (ALPR), and restricted zone intrusion monitoring using existing CCTV infrastructure.
 
 ---
+## Team Members And Roles
+Teena Munjal- Team Leader And Backend
+Akshay Meena- Project Coordinator 
+Aditya Bhati- Frontend
+Nikhilesh Khanna, Trisha Handa & Aanya Khemka- Design
 
 ## 1. Project Information
 
